@@ -1,3 +1,4 @@
+import traceback
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,38 +27,47 @@ async def verify_webhook(
 @router.post("")
 async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
     payload = await request.json()
+    print(f"--> [WEBHOOK] Payload recibido: {payload}")
     phone = None
     try:
         entry = payload.get("entry", [])
         if not entry:
+            print("--> [WEBHOOK] Sin 'entry' en payload")
             return {"status": "ignored"}
         changes = entry[0].get("changes", [])
         if not changes:
+            print("--> [WEBHOOK] Sin 'changes' en payload")
             return {"status": "ignored"}
         value = changes[0].get("value", {})
 
         # Ignorar notificaciones de estado (sent, delivered, read)
         messages = value.get("messages")
         if not messages:
+            print("--> [WEBHOOK] No contiene 'messages' (posible notificación de estado)")
             return {"status": "ignored"}
 
         message = messages[0]
         phone = message.get("from")
         if not phone:
+            print("--> [WEBHOOK] Mensaje sin remitente 'from'")
             return {"status": "ignored"}
 
         input_type = message.get("type")
+        print(f"--> [WEBHOOK] Procesando mensaje de {phone} tipo {input_type}")
         if input_type == "text":
             content, mime_type = message.get("text", {}).get("body", ""), None
+            print(f"--> [WEBHOOK] Texto: {content}")
         elif input_type in {"audio", "image"}:
             media_id = message.get(input_type, {}).get("id")
             if not media_id:
                 return {"status": "ignored"}
             content, mime_type = await whatsapp.download_media(media_id)
         else:
+            print(f"--> [WEBHOOK] Tipo no soportado: {input_type}")
             return {"status": "ignored"}
 
         extraction = await extractor.extract(input_type, content, mime_type)
+        print(f"--> [WEBHOOK] Extracción Gemini: {extraction}")
         result_type, value = await record_extraction(db, phone, input_type, extraction)
         if result_type == "budget":
             reply = f"✅ Presupuesto mensual configurado: ${value:,.2f}"
@@ -72,14 +82,19 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         else:
             reply = f"✅ Gasto registrado: ${extraction.total_spent:,.2f}\nRestante disponible: ${value:,.2f}"
 
+        print(f"--> [WEBHOOK] Enviando respuesta a {phone}: {reply}")
         await whatsapp.send_text(phone, reply)
+        print(f"--> [WEBHOOK] Respuesta enviada con éxito a {phone}")
         return {"status": "processed"}
     except ValueError as exc:
+        print(f"--> [WEBHOOK] ValueError: {exc}")
         if phone:
             try:
                 await whatsapp.send_text(phone, f"⚠️ {exc}")
-            except Exception:
-                pass
+            except Exception as send_err:
+                print(f"--> [WEBHOOK] Error al enviar mensaje de aviso: {send_err}")
         return {"status": f"handled_error: {exc}"}
     except Exception as exc:
+        print(f"--> [WEBHOOK] ERROR CRÍTICO: {type(exc).__name__} - {exc}")
+        traceback.print_exc()
         return {"status": f"error: {type(exc).__name__} - {exc}"}
