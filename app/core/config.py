@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/botgastos"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
     meta_verify_token: str = ""
     meta_access_token: str = ""
     whatsapp_phone_number_id: str = ""
@@ -19,6 +21,23 @@ class Settings(BaseSettings):
     access_mode: str = "whitelist"
     allow_free_trial: bool = False
     free_trial_max_expenses: int = 5
+
+    @field_validator("gemini_model", mode="before")
+    @classmethod
+    def sanitize_gemini_model(cls, v: str) -> str:
+        # Si la variable de entorno quedó con un modelo retirado o no disponible en Google API,
+        # lo corregimos automáticamente al modelo activo oficial para evitar errores 404 en producción.
+        deprecated = {
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-pro",
+            "gemini-1.0-pro",
+        }
+        if isinstance(v, str) and v.strip().lower() in deprecated:
+            return "gemini-3.6-flash"
+        return v or "gemini-3.6-flash"
 
     @field_validator("database_url", mode="before")
     @classmethod

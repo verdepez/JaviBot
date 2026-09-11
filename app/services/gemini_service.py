@@ -10,6 +10,7 @@ from app.core.knowledge_base import (
     try_parse_text_locally,
 )
 from app.schemas import ExtractionResult, ExtractedItem
+from app.services.groq_service import extract_with_groq, transcribe_audio_groq
 
 
 SYSTEM_INSTRUCTION = """Eres un extractor financiero para un bot de WhatsApp en español operando primordialmente en Chile (CLP, código país 56).
@@ -60,7 +61,28 @@ class GeminiExtractor:
             if not isinstance(content, bytes) or not mime_type:
                 raise ValueError("El contenido multimodal requiere bytes y mime_type")
             clean_mime = mime_type.split(";")[0].strip()
-            contents = [types.Part.from_bytes(data=content, mime_type=clean_mime)]
+
+            # Si es audio y Groq está configurado, transcribir gratis con Whisper en Groq (0 tokens Gemini)
+            if input_type == "audio" and settings.groq_api_key:
+                transcript = await transcribe_audio_groq(content, clean_mime, settings.groq_api_key)
+                if transcript:
+                    print(f"--> [EXTRACTOR] Audio transcrito por Groq Whisper: '{transcript}'")
+                    # 1. Intentar resolver localmente con la KB
+                    local_audio_res = try_parse_text_locally(transcript)
+                    if local_audio_res is not None:
+                        print("--> [EXTRACTOR] Audio resuelto localmente con KB (0 tokens consumidos)")
+                        return local_audio_res
+                    # 2. Si no coincidió con la KB, intentar con Groq Llama
+                    groq_res = await extract_with_groq(transcript, settings.groq_api_key, settings.groq_model)
+                    if groq_res is not None:
+                        print("--> [EXTRACTOR] Audio resuelto por Groq Llama (0 cuota Gemini)")
+                        return groq_res
+                    # Si Groq falló o no pudo, enviar el texto a Gemini (mucho más ligero que audio en crudo)
+                    contents = transcript
+                    input_type = "text"
+
+            if input_type != "text":
+                contents = [types.Part.from_bytes(data=content, mime_type=clean_mime)]
 
         # 2. Si no se resolvió localmente o es audio/imagen, consultar Gemini con modelos activos y fallback
         candidate_models = [
@@ -105,5 +127,12 @@ class GeminiExtractor:
                         await asyncio.sleep(1.5)
                         continue
                     break
+
+        # Si Gemini falló y tenemos Groq configurado, intentar respaldo final con Groq si es texto
+        if settings.groq_api_key and isinstance(contents, str):
+            groq_fallback = await extract_with_groq(contents, settings.groq_api_key, settings.groq_model)
+            if groq_fallback is not None:
+                print("--> [EXTRACTOR] Resuelto con éxito por Groq de respaldo final")
+                return groq_fallback
 
         raise last_err or ValueError("Gemini no devolvió una extracción válida")
