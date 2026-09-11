@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db import get_db
 from app.services.expense_service import (
+    get_expense_list,
     get_monthly_summary,
     get_or_create_user,
     record_extraction,
@@ -30,11 +31,14 @@ def get_help_message(user_name: str, user_code: str) -> str:
         "• *Con detalle:* `2 cafés por 3000`\n"
         "• *Audio 🎙️:* Manda una nota de voz diciendo lo que compraste.\n"
         "• *Foto 📸:* Envía una foto de tu boleta o ticket.\n\n"
-        "3️⃣ *Consultar tu saldo y balance:*\n"
+        "3️⃣ *Consultar tus compras y en qué gastaste:*\n"
+        "• Mes actual: `¿cuáles son mis compras?`, `ver compras` o `¿en qué gasté?`\n"
+        "• Otro mes: `compras agosto` o `gastos 2026-08`\n\n"
+        "4️⃣ *Consultar tu saldo y balance:*\n"
         "• Escribe: `saldo`, `¿cuánto me queda?` o `resumen`\n\n"
-        "4️⃣ *Personalizar tu nombre:*\n"
+        "5️⃣ *Personalizar tu nombre:*\n"
         "• Escribe: `Me llamo Carlos` (o tu nombre preferido)\n\n"
-        "5️⃣ *Ver esta ayuda:*\n"
+        "6️⃣ *Ver esta ayuda:*\n"
         "• Escribe: `ayuda` o `menu`\n\n"
         "¡Pruébame enviando un gasto o consultando tu saldo! 🚀"
     )
@@ -58,8 +62,60 @@ def format_summary(summary: dict) -> str:
         f"🏦 *Bóveda de Ahorro:* ${summary['savings']:,.2f}\n"
         f"🧾 *Compras Registradas:* {summary['expense_count']}\n"
         f"🆔 *ID Usuario:* `{code}`\n\n"
-        "💡 *Tip:* Escribe 'ayuda' para ver todas las opciones."
+        "💡 *Tip:* Escribe 'compras' para ver el detalle de cada compra o 'ayuda' para más opciones."
     )
+
+
+def format_expense_list(data: dict) -> str:
+    name = data.get("user_name", "Amigo")
+    month = data.get("month", "")
+    is_current = data.get("is_current_month", True)
+
+    month_label = f"este mes actual ({month})" if is_current else f"el mes {month}"
+
+    if not data.get("has_budget"):
+        return (
+            f"📋 *Hola {name}, no encontré registros de gastos para {month_label}.*\n\n"
+            "💡 *¿Consultar otro mes?*\n"
+            "Escribe por ejemplo: `compras agosto` o `gastos 2026-08`."
+        )
+
+    expenses = data.get("expenses", [])
+    if not expenses:
+        return (
+            f"📋 *{name}, para {month_label} no tienes compras registradas aún.*\n"
+            f"💰 Presupuesto: ${data['total_budget']:,.2f}\n"
+            f"🟢 Disponible: ${data['remaining']:,.2f}\n\n"
+            "💡 *¿Consultar otro mes?* Escribe por ejemplo: `compras 2026-08`."
+        )
+
+    lines = [f"🧾 *Compras de {name} ({month_label}):*\n"]
+    for exp in expenses:
+        fecha = exp.created_at.strftime("%d/%m %H:%M") if exp.created_at else ""
+        if exp.items:
+            items_str = ", ".join(f"{it.item_name} (${it.total_price:,.0f})" for it in exp.items[:3])
+            if len(exp.items) > 3:
+                items_str += f" (+{len(exp.items)-3} más)"
+            lines.append(f"• *{fecha}* {items_str} -> *${exp.total_amount:,.2f}*")
+        else:
+            lines.append(f"• *{fecha}* Gasto registrado -> *${exp.total_amount:,.2f}*")
+
+    lines.append(f"\n💸 *Total gastado en {month}:* ${data['total_spent']:,.2f}")
+    lines.append(f"🟢 *Saldo disponible:* ${data['remaining']:,.2f}")
+
+    if is_current:
+        lines.append(
+            "\n🗓️ *¿Buscabas otro mes?*\n"
+            "Estás viendo el *mes actual*. Para consultar meses anteriores, escribe por ejemplo:\n"
+            "👉 `compras agosto` o `gastos 2026-08`"
+        )
+    else:
+        lines.append(
+            "\n🗓️ *Para volver al mes actual*, escribe simplemente: `compras` o `saldo`."
+        )
+
+    return "\n".join(lines)
+
 
 
 @router.get("")
@@ -136,6 +192,19 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 await whatsapp.send_text(phone, get_help_message(user.name, user.user_code))
                 return {"status": "processed"}
 
+            # Comandos de lista de compras / gastos
+            expense_list_triggers = (
+                "cuales son mis compras", "cuáles son mis compras", "mis compras",
+                "muestra los gastos", "muestra mis gastos", "mostrar gastos",
+                "en que gaste", "en qué gasté", "que he comprado", "qué he comprado",
+                "ver compras", "ver gastos", "detalle de gastos", "lista de compras", "compras", "gastos"
+            )
+            if any(norm == trig or norm.startswith(trig + " ") for trig in expense_list_triggers):
+                print(f"--> [WEBHOOK] Consultando lista de compras directa para {user.name}")
+                data = await get_expense_list(db, phone, raw_month=content, profile_name=profile_name)
+                await whatsapp.send_text(phone, format_expense_list(data))
+                return {"status": "processed"}
+
             # Comandos de saldo / resumen
             if norm in {"saldo", "cuanto me queda", "cuánto me queda", "cuanto tengo", "cuánto tengo", "resumen", "balance", "estado", "cuanto he gastado", "cuánto he gastado"}:
                 print(f"--> [WEBHOOK] Consultando resumen directo para {user.name}")
@@ -158,6 +227,10 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             result_type = "balance"
             summary = await get_monthly_summary(db, phone, profile_name)
             reply = format_summary(summary)
+        elif extraction.is_expense_list_inquiry:
+            result_type = "expense_list"
+            data = await get_expense_list(db, phone, raw_month=extraction.target_month or content, profile_name=profile_name)
+            reply = format_expense_list(data)
         else:
             result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
             if result_type == "budget":
@@ -166,6 +239,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 reply = (
                     f"👋 ¡Hola {user.name}! No detecté un gasto ni consulta.\n\n"
                     "📌 *Opciones útiles:*\n"
+                    "• Ver tus compras: `¿cuáles son mis compras?` o `compras agosto`\n"
                     "• Consultar saldo: `saldo` o `¿cuánto me queda?`\n"
                     "• Registrar gasto: `Almuerzo 4500`\n"
                     "• Presupuesto: `Presupuesto 500000`\n"
