@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/botgastos"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.6-flash"
+    gemini_model: str = "gemini-2.0-flash"
     meta_verify_token: str = ""
     meta_access_token: str = ""
     whatsapp_phone_number_id: str = ""

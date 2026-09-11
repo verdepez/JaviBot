@@ -477,9 +477,20 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
     except Exception as exc:
         print(f"--> [WEBHOOK] ERROR CRÍTICO: {type(exc).__name__} - {exc}")
         traceback.print_exc()
-        if phone and ("503" in str(exc) or "UNAVAILABLE" in str(exc)):
-            try:
-                await whatsapp.send_text(phone, "[!] El servicio de IA tiene alta demanda momentánea. Por favor, reenvía tu mensaje en unos segundos.")
-            except Exception:
-                pass
+        if phone:
+            err_str = str(exc)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                try:
+                    await whatsapp.send_text(
+                        phone,
+                        "[!] El servicio de IA está con límite de cuota diario superado.\n"
+                        "▪ Puedes registrar gastos en texto simple sin límites (ej: `Almuerzo 4500` o `Insumos 12000`)."
+                    )
+                except Exception:
+                    pass
+            elif "503" in err_str or "UNAVAILABLE" in err_str:
+                try:
+                    await whatsapp.send_text(phone, "[!] El servicio de IA tiene alta demanda momentánea. Por favor, reenvía tu mensaje en unos segundos.")
+                except Exception:
+                    pass
         return {"status": f"error: {type(exc).__name__} - {exc}"}
