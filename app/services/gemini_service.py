@@ -1,3 +1,4 @@
+from typing import Any
 import asyncio
 from google import genai
 from google.genai import errors, types
@@ -27,8 +28,9 @@ class GeminiExtractor:
         content: str | bytes,
         mime_type: str | None = None,
     ) -> ExtractionResult:
+        contents: Any
         if input_type == "text":
-            contents: str | list[types.Part] = content if isinstance(content, str) else content.decode()
+            contents = content if isinstance(content, str) else content.decode()
         else:
             if not isinstance(content, bytes) or not mime_type:
                 raise ValueError("El contenido multimodal requiere bytes y mime_type")

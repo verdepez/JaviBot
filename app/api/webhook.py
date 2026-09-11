@@ -229,7 +229,8 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             reply = format_summary(summary)
         elif extraction.is_expense_list_inquiry:
             result_type = "expense_list"
-            data = await get_expense_list(db, phone, raw_month=extraction.target_month or content, profile_name=profile_name)
+            month_param = extraction.target_month or (content if isinstance(content, str) else None)
+            data = await get_expense_list(db, phone, raw_month=month_param, profile_name=profile_name)
             reply = format_expense_list(data)
         else:
             result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
