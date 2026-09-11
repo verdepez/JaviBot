@@ -77,11 +77,15 @@ async def init_db() -> None:
                     id SERIAL PRIMARY KEY,
                     message_id VARCHAR(128) UNIQUE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS ix_processed_messages_message_id ON processed_messages (message_id);
-                CREATE INDEX IF NOT EXISTS ix_processed_messages_created_at ON processed_messages (created_at);
+                )
                 """
             )
+        )
+        await connection.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS ix_processed_messages_message_id ON processed_messages (message_id);")
+        )
+        await connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_processed_messages_created_at ON processed_messages (created_at);")
         )
 
         # Limpieza automática de gastos duplicados producidos por reintentos de webhook
