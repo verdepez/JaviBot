@@ -120,6 +120,54 @@ async def init_db() -> None:
             {"hash": ghost_hash},
         )
 
+        # Corrector de datos monetarios chilenos mal registrados:
+        # 1. Caso específico del ítem 'Insumos 45,983' registrado erróneamente como 45.98
+        await connection.execute(
+            text(
+                """
+                UPDATE expense_items
+                SET unit_price = 45983.00, total_price = 45983.00
+                WHERE total_price = 45.98 AND item_name ILIKE '%insumo%';
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                """
+                UPDATE expenses
+                SET total_amount = 45983.00
+                WHERE total_amount = 45.98;
+                """
+            )
+        )
+        # 2. Corrector general para montos chilenos donde la coma de miles fue interpretada como punto decimal
+        # (en Chile los gastos no tienen centavos y son de miles de pesos)
+        await connection.execute(
+            text(
+                """
+                UPDATE expense_items
+                SET unit_price = ROUND(unit_price * 1000, 2),
+                    total_price = ROUND(total_price * 1000, 2)
+                WHERE total_price > 0 AND total_price < 1000 AND (total_price != ROUND(total_price, 0))
+                  AND NOT (total_price = 45983.00 AND item_name ILIKE '%insumo%');
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                """
+                UPDATE expenses
+                SET total_amount = (
+                    SELECT COALESCE(SUM(total_price), expenses.total_amount)
+                    FROM expense_items
+                    WHERE expense_items.expense_id = expenses.id
+                )
+                WHERE total_amount > 0 AND total_amount < 1000 AND (total_amount != ROUND(total_amount, 0))
+                  AND total_amount != 45983.00;
+                """
+            )
+        )
+
 
 if __name__ == "__main__":
     asyncio.run(init_db())

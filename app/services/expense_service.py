@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
+from app.core.formatters import format_currency
 from app.core.security import clean_first_name, encrypt_phone, generate_user_code, hash_phone
 from app.models import Budget, Expense, ExpenseItem, SavingsVault, User
 from app.schemas import ExtractionResult
@@ -342,6 +343,6 @@ async def delete_last_expense(db: AsyncSession, phone_number: str) -> tuple[bool
     return (
         True,
         f"✓ *Gasto eliminado con éxito*, {user.name}:\n"
-        f"▪ Detalle: {items_desc} (${deleted_amount:,.2f})\n"
-        f"▪ Saldo disponible actualizado: *${summary['remaining']:,.2f}*"
+        f"▪ Detalle: {items_desc} ({format_currency(deleted_amount)})\n"
+        f"▪ Saldo disponible actualizado: *{format_currency(summary['remaining'])}*"
     )

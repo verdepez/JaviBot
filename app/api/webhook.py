@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.formatters import format_currency
 from app.db import get_db
 from app.models import ProcessedMessage
 from app.services.admin_service import handle_admin_command, is_admin_phone
@@ -87,10 +88,10 @@ def format_summary(summary: dict) -> str:
         f"▪ Periodo: {summary['month']}\n"
         f"▪ ID Usuario: `{code}`\n"
         "──────────────────────────\n"
-        f"▪ Presupuesto: ${summary['total_budget']:,.2f}\n"
-        f"▪ Total Gastado: ${summary['spent']:,.2f}\n"
-        f"▪ Saldo Disponible: ${summary['remaining']:,.2f}\n"
-        f"▪ Ahorro en Bóveda: ${summary['savings']:,.2f}\n"
+        f"▪ Presupuesto: {format_currency(summary['total_budget'])}\n"
+        f"▪ Total Gastado: {format_currency(summary['spent'])}\n"
+        f"▪ Saldo Disponible: {format_currency(summary['remaining'])}\n"
+        f"▪ Ahorro en Bóveda: {format_currency(summary['savings'])}\n"
         f"▪ Compras Registradas: {summary['expense_count']}\n\n"
         "▸ *Tip:* Escribe 'compras' para ver el detalle de cada compra o 'ayuda' para más opciones."
     )
@@ -116,8 +117,8 @@ def format_expense_list(data: dict) -> str:
             f"■ *COMPRAS* | {name} ({month_label})\n"
             "──────────────────────────\n"
             "No tienes compras registradas en este período.\n"
-            f"▪ Presupuesto: ${data['total_budget']:,.2f}\n"
-            f"▪ Saldo disponible: ${data['remaining']:,.2f}\n\n"
+            f"▪ Presupuesto: {format_currency(data['total_budget'])}\n"
+            f"▪ Saldo disponible: {format_currency(data['remaining'])}\n\n"
             "▸ *¿Consultar otro mes?* Escribe: `compras 2026-08`."
         )
 
@@ -128,16 +129,16 @@ def format_expense_list(data: dict) -> str:
     for exp in expenses:
         fecha = exp.created_at.strftime("%d/%m %H:%M") if exp.created_at else ""
         if exp.items:
-            items_str = ", ".join(f"{it.item_name} (${it.total_price:,.0f})" for it in exp.items[:3])
+            items_str = ", ".join(f"{it.item_name} ({format_currency(it.total_price)})" for it in exp.items[:3])
             if len(exp.items) > 3:
                 items_str += f" (+{len(exp.items)-3} más)"
-            lines.append(f"• {fecha} | {items_str} -> *${exp.total_amount:,.2f}*")
+            lines.append(f"• {fecha} | {items_str} -> *{format_currency(exp.total_amount)}*")
         else:
-            lines.append(f"• {fecha} | Gasto registrado -> *${exp.total_amount:,.2f}*")
+            lines.append(f"• {fecha} | Gasto registrado -> *{format_currency(exp.total_amount)}*")
 
     lines.append("──────────────────────────")
-    lines.append(f"▪ Total gastado en {month}: ${data['total_spent']:,.2f}")
-    lines.append(f"▪ Saldo disponible: ${data['remaining']:,.2f}")
+    lines.append(f"▪ Total gastado en {month}: {format_currency(data['total_spent'])}")
+    lines.append(f"▪ Saldo disponible: {format_currency(data['remaining'])}")
 
     if is_current:
         lines.append(
@@ -433,7 +434,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         else:
             result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
             if result_type == "budget":
-                reply = f"✓ Presupuesto mensual configurado, {user.name}: ${value:,.2f}"
+                reply = f"✓ Presupuesto mensual configurado, {user.name}: {format_currency(value)}"
             elif result_type == "unrecognized":
                 reply = (
                     f"[!] Hola {user.name}, no detecté un gasto ni consulta.\n\n"
@@ -447,8 +448,8 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 )
             else:
                 reply = (
-                    f"✓ Gasto registrado, {user.name}: ${extraction.total_spent:,.2f}\n"
-                    f"▪ Saldo disponible: ${value:,.2f}"
+                    f"✓ Gasto registrado, {user.name}: {format_currency(extraction.total_spent)}\n"
+                    f"▪ Saldo disponible: {format_currency(value)}"
                 )
                 if is_in_trial:
                     user.trial_expense_count += 1

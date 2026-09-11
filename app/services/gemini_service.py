@@ -8,9 +8,14 @@ from app.core.config import settings
 from app.schemas import ExtractionResult, ExtractedItem
 
 
-SYSTEM_INSTRUCTION = """Eres un extractor financiero para un bot de WhatsApp en español.
-Analiza texto, audio o imágenes de compras. Devuelve únicamente el JSON que cumple el
-esquema indicado.
+SYSTEM_INSTRUCTION = """Eres un extractor financiero para un bot de WhatsApp en español operando primordialmente en Chile (CLP, código país 56).
+Analiza texto, audio o imágenes de compras. Devuelve únicamente el JSON que cumple el esquema indicado.
+- CONVENCIÓN MONETARIA DE CHILE (CLP):
+  - La moneda es el Peso Chileno (símbolo $).
+  - En Chile los miles se separan con punto '.' (ej: 45.983 o 1.000.000) o coma ',' en teclados de smartphones (ej: 45,983).
+  - Si un monto tiene 3 dígitos tras un punto o coma (ej: 45.983 o 45,983 o 12,000 o 3,500), son cuarenta y cinco mil pesos (45983), doce mil pesos (12000), tres mil quinientos (3500). NUNCA interpretes esos 3 dígitos como decimales.
+  - El peso chileno no usa centavos en transacciones diarias. Si aparecen decimales, van tras una coma con 1 o 2 dígitos.
+  - Devuelve siempre los montos 'total_spent', 'budget_amount' y 'unit_price' en su valor real completo (ej: 45983.0, 12000.0).
 - Las imágenes de boletas, recibos, facturas, tickets o vouchers son SIEMPRE compras o gastos realizados (NUNCA consultas). Para cualquier imagen, fija siempre is_expense_list_inquiry=false e is_balance_inquiry=false.
 - Si el mensaje de texto o audio configura presupuesto, marca is_budget_setup=true y extrae budget_amount.
 - Si el usuario pregunta expresamente por la lista, detalle o desglose de sus compras/gastos (ej: 'cuales son mis compras', 'muestra los gastos', 'en que gaste', 'mis compras', 'ver gastos'), marca is_expense_list_inquiry=true. Si menciona un mes específico (ej: 'de agosto', 'del mes pasado', '2026-08'), extrae target_month en formato 'YYYY-MM'. Si no menciona mes, deja target_month=null.
@@ -21,16 +26,47 @@ esquema indicado.
 
 def parse_amount(val_str: str) -> float | None:
     clean = val_str.replace("$", "").replace(" ", "").strip()
-    if "." in clean and "," not in clean:
-        parts = clean.split(".")
-        if len(parts[-1]) == 3:
-            clean = "".join(parts)
+    if not clean:
+        return None
+
+    # Caso 1: Tiene tanto puntos como comas. Ej: "1.000.000,50" o "1,000,000.50"
+    if "." in clean and "," in clean:
+        last_dot = clean.rfind(".")
+        last_comma = clean.rfind(",")
+        if last_comma > last_dot:
+            # Formato chileno/latino: puntos son miles, coma es decimal (1.000.000,50)
+            clean = clean.replace(".", "").replace(",", ".")
         else:
-            clean = clean.replace(".", "")
-    elif "," in clean and "." in clean:
-        clean = clean.replace(".", "").replace(",", ".")
+            # Formato anglosajón: comas son miles, punto es decimal (1,000,000.50)
+            clean = clean.replace(",", "")
+
+    # Caso 2: Solo tiene puntos. Ej: "1.000.000" o "45.983" o "45.50"
+    elif "." in clean:
+        parts = clean.split(".")
+        if len(parts) > 2:
+            # Múltiples puntos son miles: 1.000.000 -> 1000000
+            clean = "".join(parts)
+        elif len(parts) == 2:
+            # Si tras el punto hay 3 dígitos: 45.000 o 45.983 -> Son miles en Chile
+            if len(parts[1]) == 3:
+                clean = parts[0] + parts[1]
+            else:
+                clean = clean
+
+    # Caso 3: Solo tiene comas. Ej: "1,000,000" o "45,983" o "45,50"
     elif "," in clean:
-        clean = clean.replace(",", ".")
+        parts = clean.split(",")
+        if len(parts) > 2:
+            # Múltiples comas son miles: 1,000,000 -> 1000000
+            clean = "".join(parts)
+        elif len(parts) == 2:
+            # Si tras la coma hay exactamente 3 dígitos: 45,983 o 12,000 -> Son miles (teclado móvil o formato miles)
+            if len(parts[1]) == 3:
+                clean = parts[0] + parts[1]
+            else:
+                # 1 o 2 dígitos tras la coma son decimales: 45,50 -> 45.50
+                clean = parts[0] + "." + parts[1]
+
     try:
         val = float(clean)
         return val if val > 0 else None
