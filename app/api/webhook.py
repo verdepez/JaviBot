@@ -155,6 +155,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         print(f"--> [WEBHOOK] Extracción Gemini: {extraction}")
 
         if extraction.is_balance_inquiry:
+            result_type = "balance"
             summary = await get_monthly_summary(db, phone, profile_name)
             reply = format_summary(summary)
         else:

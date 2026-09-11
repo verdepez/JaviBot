@@ -8,11 +8,11 @@ class Settings(BaseSettings):
     app_name: str = "botGastos API"
     environment: str = "development"
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/botgastos"
-    gemini_api_key: str
+    gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
-    meta_verify_token: str
-    meta_access_token: str
-    whatsapp_phone_number_id: str
+    meta_verify_token: str = ""
+    meta_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
     whatsapp_api_version: str = "v23.0"
     encryption_secret: str = "botgastos-secret-encryption-key-32bytes"
 
