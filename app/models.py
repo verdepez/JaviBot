@@ -11,7 +11,12 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    phone_number: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    phone_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    encrypted_phone: Mapped[str] = mapped_column(String(255))
+    name: Mapped[str] = mapped_column(String(100), default="Amigo")
+    user_code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    # Campo opcional para retrocompatibilidad con bases de datos anteriores
+    phone_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     budgets: Mapped[list["Budget"]] = relationship(back_populates="user", cascade="all, delete-orphan")

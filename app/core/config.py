@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     meta_access_token: str
     whatsapp_phone_number_id: str
     whatsapp_api_version: str = "v23.0"
+    encryption_secret: str = "botgastos-secret-encryption-key-32bytes"
 
     @field_validator("database_url", mode="before")
     @classmethod

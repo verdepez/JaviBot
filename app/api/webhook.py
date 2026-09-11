@@ -4,7 +4,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db import get_db
-from app.services.expense_service import get_monthly_summary, record_extraction
+from app.services.expense_service import (
+    get_monthly_summary,
+    get_or_create_user,
+    record_extraction,
+    update_user_name,
+)
 from app.services.gemini_service import GeminiExtractor
 from app.services.whatsapp_service import WhatsAppClient
 
@@ -12,38 +17,47 @@ router = APIRouter(prefix="/webhook", tags=["whatsapp"])
 extractor = GeminiExtractor()
 whatsapp = WhatsAppClient()
 
-HELP_MESSAGE = (
-    "🤖 *¡Hola! Soy JaviBot, tu asistente de gastos.*\n\n"
-    "Aquí tienes una guía rápida de cómo usarme:\n\n"
-    "1️⃣ *Configurar tu presupuesto mensual:*\n"
-    "• Escribe: `Presupuesto 500000`\n\n"
-    "2️⃣ *Registrar gastos diarios:*\n"
-    "• *Texto simple:* `Almuerzo 4500` o `Uber 3200`\n"
-    "• *Con detalle:* `2 cafés por 3000`\n"
-    "• *Audio 🎙️:* Manda una nota de voz diciendo lo que compraste.\n"
-    "• *Foto 📸:* Envía una foto de tu boleta o ticket.\n\n"
-    "3️⃣ *Consultar tu saldo y balance:*\n"
-    "• Escribe: `saldo`, `¿cuánto me queda?` o `resumen`\n\n"
-    "4️⃣ *Ver esta ayuda:*\n"
-    "• Escribe: `ayuda` o `menu`\n\n"
-    "¡Pruébame enviando un gasto o consultando tu saldo! 🚀"
-)
+
+def get_help_message(user_name: str, user_code: str) -> str:
+    return (
+        f"🤖 *¡Hola {user_name}! Soy JaviBot, tu asistente de gastos.*\n"
+        f"🆔 Tu código único: `{user_code}`\n\n"
+        "Aquí tienes una guía rápida de cómo usarme:\n\n"
+        "1️⃣ *Configurar tu presupuesto mensual:*\n"
+        "• Escribe: `Presupuesto 500000`\n\n"
+        "2️⃣ *Registrar gastos diarios:*\n"
+        "• *Texto simple:* `Almuerzo 4500` o `Uber 3200`\n"
+        "• *Con detalle:* `2 cafés por 3000`\n"
+        "• *Audio 🎙️:* Manda una nota de voz diciendo lo que compraste.\n"
+        "• *Foto 📸:* Envía una foto de tu boleta o ticket.\n\n"
+        "3️⃣ *Consultar tu saldo y balance:*\n"
+        "• Escribe: `saldo`, `¿cuánto me queda?` o `resumen`\n\n"
+        "4️⃣ *Personalizar tu nombre:*\n"
+        "• Escribe: `Me llamo Carlos` (o tu nombre preferido)\n\n"
+        "5️⃣ *Ver esta ayuda:*\n"
+        "• Escribe: `ayuda` o `menu`\n\n"
+        "¡Pruébame enviando un gasto o consultando tu saldo! 🚀"
+    )
 
 
 def format_summary(summary: dict) -> str:
+    name = summary.get("user_name", "Amigo")
+    code = summary.get("user_code", "")
     if not summary.get("has_budget"):
         return (
-            f"⚠️ *No tienes un presupuesto configurado para este mes ({summary.get('month')}).*\n\n"
+            f"⚠️ *{name}, no tienes un presupuesto configurado para este mes ({summary.get('month')}).*\n\n"
             "Configúralo fácilmente enviando:\n"
-            "👉 `Presupuesto 500000`"
+            "👉 `Presupuesto 500000`\n\n"
+            f"🆔 ID Usuario: `{code}`"
         )
     return (
-        f"📊 *Resumen Mensual ({summary['month']})*\n\n"
+        f"📊 *Resumen Mensual de {name} ({summary['month']})*\n\n"
         f"💰 *Presupuesto:* ${summary['total_budget']:,.2f}\n"
         f"💸 *Total Gastado:* ${summary['spent']:,.2f}\n"
         f"🟢 *Restante Disponible:* ${summary['remaining']:,.2f}\n"
         f"🏦 *Bóveda de Ahorro:* ${summary['savings']:,.2f}\n"
-        f"🧾 *Compras Registradas:* {summary['expense_count']}\n\n"
+        f"🧾 *Compras Registradas:* {summary['expense_count']}\n"
+        f"🆔 *ID Usuario:* `{code}`\n\n"
         "💡 *Tip:* Escribe 'ayuda' para ver todas las opciones."
     )
 
@@ -84,24 +98,48 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         if not phone:
             return {"status": "ignored"}
 
+        # Extraer nombre del perfil de WhatsApp si viene en el webhook
+        contacts = value.get("contacts", [])
+        profile_name = None
+        if contacts and isinstance(contacts, list):
+            profile_name = contacts[0].get("profile", {}).get("name")
+
+        # Obtener o crear usuario de forma segura (cifrado + hash)
+        user, is_new_user = await get_or_create_user(db, phone, profile_name)
+
         input_type = message.get("type")
-        print(f"--> [WEBHOOK] Procesando mensaje de {phone} tipo {input_type}")
+        print(f"--> [WEBHOOK] Procesando mensaje de {user.name} ({user.user_code}) tipo {input_type}")
 
         # Atajos rápidos de texto (sin llamar a Gemini: respuesta instantánea)
         if input_type == "text":
             content = message.get("text", {}).get("body", "").strip()
             mime_type = None
-            print(f"--> [WEBHOOK] Texto: {content}")
+            print(f"--> [WEBHOOK] Texto de {user.name}: {content}")
             norm = content.lower().strip().strip("¿?¡!.,")
 
+            # Cambio de nombre del usuario
+            for prefix in ("me llamo ", "mi nombre es ", "llamame ", "llámame ", "cambiar nombre a "):
+                if norm.startswith(prefix):
+                    new_name_input = content[len(prefix) :].strip()
+                    if new_name_input:
+                        user, updated_name = await update_user_name(db, phone, new_name_input)
+                        confirm_msg = (
+                            f"✨ ¡Listo! A partir de ahora te llamaré *{updated_name}*.\n"
+                            f"🆔 Tu identificador único es `{user.user_code}`."
+                        )
+                        await whatsapp.send_text(phone, confirm_msg)
+                        return {"status": "processed"}
+
+            # Comandos de ayuda
             if norm in {"ayuda", "help", "menu", "menú", "inicio", "start", "hola", "buenas", "como funciona", "cómo funciona", "que puedes hacer", "qué puedes hacer"}:
-                print(f"--> [WEBHOOK] Enviando mensaje de ayuda a {phone}")
-                await whatsapp.send_text(phone, HELP_MESSAGE)
+                print(f"--> [WEBHOOK] Enviando mensaje de ayuda a {user.name}")
+                await whatsapp.send_text(phone, get_help_message(user.name, user.user_code))
                 return {"status": "processed"}
 
+            # Comandos de saldo / resumen
             if norm in {"saldo", "cuanto me queda", "cuánto me queda", "cuanto tengo", "cuánto tengo", "resumen", "balance", "estado", "cuanto he gastado", "cuánto he gastado"}:
-                print(f"--> [WEBHOOK] Consultando resumen directo para {phone}")
-                summary = await get_monthly_summary(db, phone)
+                print(f"--> [WEBHOOK] Consultando resumen directo para {user.name}")
+                summary = await get_monthly_summary(db, phone, profile_name)
                 await whatsapp.send_text(phone, format_summary(summary))
                 return {"status": "processed"}
         elif input_type in {"audio", "image"}:
@@ -117,23 +155,31 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         print(f"--> [WEBHOOK] Extracción Gemini: {extraction}")
 
         if extraction.is_balance_inquiry:
-            summary = await get_monthly_summary(db, phone)
+            summary = await get_monthly_summary(db, phone, profile_name)
             reply = format_summary(summary)
         else:
-            result_type, value = await record_extraction(db, phone, input_type, extraction)
+            result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
             if result_type == "budget":
-                reply = f"✅ Presupuesto mensual configurado: ${value:,.2f}"
+                reply = f"✅ Presupuesto mensual configurado, {user.name}: ${value:,.2f}"
             elif result_type == "unrecognized":
                 reply = (
-                    "👋 ¡Hola! No detecté un gasto ni consulta.\n\n"
+                    f"👋 ¡Hola {user.name}! No detecté un gasto ni consulta.\n\n"
                     "📌 *Opciones útiles:*\n"
                     "• Consultar saldo: `saldo` o `¿cuánto me queda?`\n"
                     "• Registrar gasto: `Almuerzo 4500`\n"
                     "• Presupuesto: `Presupuesto 500000`\n"
+                    "• Cambiar tu nombre: `Me llamo [Nombre]`\n"
                     "• Ver guía completa: `ayuda`"
                 )
             else:
-                reply = f"✅ Gasto registrado: ${extraction.total_spent:,.2f}\nRestante disponible: ${value:,.2f}"
+                reply = f"✅ Gasto registrado, {user.name}: ${extraction.total_spent:,.2f}\nRestante disponible: ${value:,.2f}"
+
+        # Si es un usuario recién creado, darle una bienvenida introductoria
+        if is_new_user and result_type != "budget":
+            reply = (
+                f"👋 *¡Mucho gusto, {user.name}!* Te he registrado en JaviBot con el ID `{user.user_code}`.\n\n"
+                + reply
+            )
 
         print(f"--> [WEBHOOK] Enviando respuesta a {phone}: {reply}")
         await whatsapp.send_text(phone, reply)
