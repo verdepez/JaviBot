@@ -52,9 +52,13 @@ async def init_db() -> None:
                     {"hash": p_hash, "enc": p_enc, "code": u_code, "name": u_name, "id": uid},
                 )
 
-        # Crear índices únicos
+        # Crear índices para optimización de consultas de alto rendimiento
         await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_phone_hash ON users (phone_hash);"))
         await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_user_code ON users (user_code);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_users_status ON users (status);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_users_phone_number ON users (phone_number);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_expenses_budget_created ON expenses (budget_id, created_at DESC);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_expense_items_category ON expense_items (category);"))
 
         # Asegurar privilegios de admin para settings.admin_phone si está configurado
         if settings.admin_phone:
@@ -75,6 +79,7 @@ async def init_db() -> None:
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS ix_processed_messages_message_id ON processed_messages (message_id);
+                CREATE INDEX IF NOT EXISTS ix_processed_messages_created_at ON processed_messages (created_at);
                 """
             )
         )
