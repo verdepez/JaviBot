@@ -108,20 +108,28 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
                 items=[],
             )
 
-    # 2. Compras con verbos: "Compré insumos por 12000 pesos", "Compre maquinas por 3500", "Gaste 15000 en bencina", "Pagué 20000 de luz"
-    m_verb1 = re.search(r"^(?:compr[eé]|pagu[eé]|gast[eé])\s+(.+?)\s+(?:por|en|de)\s+\$?\s*([0-9][0-9.,\s]*?)(?:\s*(?:pesos|clp|\$))?$", norm)
+    # 2. Compras con verbos: "Compré insumos por 12000 pesos", "Registra mi ropa comprada por 34000", "Anota almuerzo por 4500"
+    m_verb1 = re.search(
+        r"^(?:registra|anota|ingresa|agrega|compr[eé]|pagu[eé]|gast[eé])\s+(?:mi\s+|el\s+|la\s+|un\s+|una\s+)?(.+?)(?:\s+comprad[oa]s?)?\s+(?:por|en|de)\s+\$?([0-9][0-9.,]*)",
+        norm,
+    )
     if m_verb1:
         desc = m_verb1.group(1).strip()
+        # Si la descripción viene con texto adicional tras el monto o verbos
+        desc_clean = re.sub(r"\s+(?:y\s+luego|luego|para|y).*$", "", desc).strip()
         amt = parse_amount(m_verb1.group(2))
-        if amt and desc:
-            cat = categorize_item(desc)
+        if amt and desc_clean:
+            cat = categorize_item(desc_clean)
             return ExtractionResult(
                 is_budget_setup=False,
                 total_spent=amt,
-                items=[ExtractedItem(name=desc.capitalize(), quantity=1, unit_price=amt, total=amt, category=cat)],
+                items=[ExtractedItem(name=desc_clean.capitalize(), quantity=1, unit_price=amt, total=amt, category=cat)],
             )
 
-    m_verb2 = re.search(r"^(?:compr[eé]|pagu[eé]|gast[eé])\s+\$?\s*([0-9][0-9.,\s]*?)(?:\s*(?:pesos|clp|\$))?\s+(?:por|en|de)\s+(.+?)$", norm)
+    m_verb2 = re.search(
+        r"^(?:registra|anota|ingresa|agrega|compr[eé]|pagu[eé]|gast[eé])\s+\$?([0-9][0-9.,]*)(?:\s*(?:pesos|clp|\$))?\s+(?:por|en|de)\s+(.+?)$",
+        norm,
+    )
     if m_verb2:
         amt = parse_amount(m_verb2.group(1))
         desc = m_verb2.group(2).strip()
@@ -190,9 +198,10 @@ class GeminiExtractor:
         # 2. Si no es texto simple o requiere multimodal, consultar Gemini con tolerancia a fallos y fallback
         candidate_models = [
             settings.gemini_model,
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-2.0-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
         ]
         models_to_try = []
         for m in candidate_models:
@@ -221,9 +230,9 @@ class GeminiExtractor:
                     last_err = err
                     err_msg = str(err)
                     print(f"--> [EXTRACTOR] Error con modelo {model_name} (intento {attempt+1}): {err_msg}")
-                    # Si es 429 Quota Exceeded, saltar inmediatamente al siguiente modelo de la cadena
-                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
-                        print(f"--> [EXTRACTOR] Cuota agotada en {model_name}. Probando modelo alternativo...")
+                    # Si es 429 Quota Exceeded o 404 Not Found, pasar inmediatamente al siguiente modelo
+                    if any(code in err_msg for code in ("429", "404", "RESOURCE_EXHAUSTED", "NOT_FOUND", "quota")):
+                        print(f"--> [EXTRACTOR] Modelo {model_name} no disponible o con cuota agotada. Probando modelo alternativo...")
                         break
                     if attempt == 0 and ("503" in err_msg or "UNAVAILABLE" in err_msg):
                         await asyncio.sleep(1.5)
