@@ -21,26 +21,26 @@ whatsapp = WhatsAppClient()
 
 def get_help_message(user_name: str, user_code: str) -> str:
     return (
-        f"🤖 *¡Hola {user_name}! Soy JaviBot, tu asistente de gastos.*\n"
-        f"🆔 Tu código único: `{user_code}`\n\n"
-        "Aquí tienes una guía rápida de cómo usarme:\n\n"
-        "1️⃣ *Configurar tu presupuesto mensual:*\n"
-        "• Escribe: `Presupuesto 500000`\n\n"
-        "2️⃣ *Registrar gastos diarios:*\n"
+        f"■ *JAVIBOT* | Control de Gastos\n"
+        f"▪ ID Usuario: `{user_code}`\n"
+        f"▪ Usuario: *{user_name}*\n"
+        "──────────────────────────\n\n"
+        "[1] *Configurar presupuesto:*\n"
+        "• Enviar: `Presupuesto 500000`\n\n"
+        "[2] *Registrar gastos diarios:*\n"
         "• *Texto simple:* `Almuerzo 4500` o `Uber 3200`\n"
         "• *Con detalle:* `2 cafés por 3000`\n"
-        "• *Audio 🎙️:* Manda una nota de voz diciendo lo que compraste.\n"
-        "• *Foto 📸:* Envía una foto de tu boleta o ticket.\n\n"
-        "3️⃣ *Consultar tus compras y en qué gastaste:*\n"
-        "• Mes actual: `¿cuáles son mis compras?`, `ver compras` o `¿en qué gasté?`\n"
-        "• Otro mes: `compras agosto` o `gastos 2026-08`\n\n"
-        "4️⃣ *Consultar tu saldo y balance:*\n"
-        "• Escribe: `saldo`, `¿cuánto me queda?` o `resumen`\n\n"
-        "5️⃣ *Personalizar tu nombre:*\n"
-        "• Escribe: `Me llamo Carlos` (o tu nombre preferido)\n\n"
-        "6️⃣ *Ver esta ayuda:*\n"
-        "• Escribe: `ayuda` o `menu`\n\n"
-        "¡Pruébame enviando un gasto o consultando tu saldo! 🚀"
+        "• *Audio:* Nota de voz indicando tu compra.\n"
+        "• *Boleta:* Foto de tu ticket o boleta.\n\n"
+        "[3] *Consultar compras y detalle:*\n"
+        "• *Mes actual:* `mis compras`, `ver compras` o `en que gaste`\n"
+        "• *Otro mes:* `compras agosto` o `gastos 2026-08`\n\n"
+        "[4] *Consultar saldo:*\n"
+        "• Enviar: `saldo`, `cuanto me queda` o `resumen`\n\n"
+        "[5] *Personalizar tu nombre:*\n"
+        "• Enviar: `Me llamo Carlos` (o tu nombre preferido)\n\n"
+        "[6] *Ver esta ayuda:*\n"
+        "• Enviar: `ayuda` o `menu`"
     )
 
 
@@ -49,20 +49,22 @@ def format_summary(summary: dict) -> str:
     code = summary.get("user_code", "")
     if not summary.get("has_budget"):
         return (
-            f"⚠️ *{name}, no tienes un presupuesto configurado para este mes ({summary.get('month')}).*\n\n"
-            "Configúralo fácilmente enviando:\n"
-            "👉 `Presupuesto 500000`\n\n"
-            f"🆔 ID Usuario: `{code}`"
+            f"[!] *{name}, no tienes un presupuesto configurado para este mes ({summary.get('month')}).*\n\n"
+            "Configúralo enviando:\n"
+            "▸ `Presupuesto 500000`\n\n"
+            f"▪ ID Usuario: `{code}`"
         )
     return (
-        f"📊 *Resumen Mensual de {name} ({summary['month']})*\n\n"
-        f"💰 *Presupuesto:* ${summary['total_budget']:,.2f}\n"
-        f"💸 *Total Gastado:* ${summary['spent']:,.2f}\n"
-        f"🟢 *Restante Disponible:* ${summary['remaining']:,.2f}\n"
-        f"🏦 *Bóveda de Ahorro:* ${summary['savings']:,.2f}\n"
-        f"🧾 *Compras Registradas:* {summary['expense_count']}\n"
-        f"🆔 *ID Usuario:* `{code}`\n\n"
-        "💡 *Tip:* Escribe 'compras' para ver el detalle de cada compra o 'ayuda' para más opciones."
+        f"■ *RESUMEN MENSUAL* | {name}\n"
+        f"▪ Periodo: {summary['month']}\n"
+        f"▪ ID Usuario: `{code}`\n"
+        "──────────────────────────\n"
+        f"▪ Presupuesto: ${summary['total_budget']:,.2f}\n"
+        f"▪ Total Gastado: ${summary['spent']:,.2f}\n"
+        f"▪ Saldo Disponible: ${summary['remaining']:,.2f}\n"
+        f"▪ Ahorro en Bóveda: ${summary['savings']:,.2f}\n"
+        f"▪ Compras Registradas: {summary['expense_count']}\n\n"
+        "▸ *Tip:* Escribe 'compras' para ver el detalle de cada compra o 'ayuda' para más opciones."
     )
 
 
@@ -75,46 +77,53 @@ def format_expense_list(data: dict) -> str:
 
     if not data.get("has_budget"):
         return (
-            f"📋 *Hola {name}, no encontré registros de gastos para {month_label}.*\n\n"
-            "💡 *¿Consultar otro mes?*\n"
+            f"[!] *{name}, no se encontraron registros para {month_label}.*\n\n"
+            "▸ *¿Consultar otro mes?*\n"
             "Escribe por ejemplo: `compras agosto` o `gastos 2026-08`."
         )
 
     expenses = data.get("expenses", [])
     if not expenses:
         return (
-            f"📋 *{name}, para {month_label} no tienes compras registradas aún.*\n"
-            f"💰 Presupuesto: ${data['total_budget']:,.2f}\n"
-            f"🟢 Disponible: ${data['remaining']:,.2f}\n\n"
-            "💡 *¿Consultar otro mes?* Escribe por ejemplo: `compras 2026-08`."
+            f"■ *COMPRAS* | {name} ({month_label})\n"
+            "──────────────────────────\n"
+            "No tienes compras registradas en este período.\n"
+            f"▪ Presupuesto: ${data['total_budget']:,.2f}\n"
+            f"▪ Saldo disponible: ${data['remaining']:,.2f}\n\n"
+            "▸ *¿Consultar otro mes?* Escribe: `compras 2026-08`."
         )
 
-    lines = [f"🧾 *Compras de {name} ({month_label}):*\n"]
+    lines = [
+        f"■ *DETALLE DE COMPRAS* | {name} ({month_label})",
+        "──────────────────────────",
+    ]
     for exp in expenses:
         fecha = exp.created_at.strftime("%d/%m %H:%M") if exp.created_at else ""
         if exp.items:
             items_str = ", ".join(f"{it.item_name} (${it.total_price:,.0f})" for it in exp.items[:3])
             if len(exp.items) > 3:
                 items_str += f" (+{len(exp.items)-3} más)"
-            lines.append(f"• *{fecha}* {items_str} -> *${exp.total_amount:,.2f}*")
+            lines.append(f"• {fecha} | {items_str} -> *${exp.total_amount:,.2f}*")
         else:
-            lines.append(f"• *{fecha}* Gasto registrado -> *${exp.total_amount:,.2f}*")
+            lines.append(f"• {fecha} | Gasto registrado -> *${exp.total_amount:,.2f}*")
 
-    lines.append(f"\n💸 *Total gastado en {month}:* ${data['total_spent']:,.2f}")
-    lines.append(f"🟢 *Saldo disponible:* ${data['remaining']:,.2f}")
+    lines.append("──────────────────────────")
+    lines.append(f"▪ Total gastado en {month}: ${data['total_spent']:,.2f}")
+    lines.append(f"▪ Saldo disponible: ${data['remaining']:,.2f}")
 
     if is_current:
         lines.append(
-            "\n🗓️ *¿Buscabas otro mes?*\n"
+            "\n▸ *¿Buscabas otro mes?*\n"
             "Estás viendo el *mes actual*. Para consultar meses anteriores, escribe por ejemplo:\n"
-            "👉 `compras agosto` o `gastos 2026-08`"
+            "▸ `compras agosto` o `gastos 2026-08`"
         )
     else:
         lines.append(
-            "\n🗓️ *Para volver al mes actual*, escribe simplemente: `compras` o `saldo`."
+            "\n▸ *Para volver al mes actual*, escribe: `compras` o `saldo`."
         )
 
     return "\n".join(lines)
+
 
 
 
@@ -180,8 +189,8 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     if new_name_input:
                         user, updated_name = await update_user_name(db, phone, new_name_input)
                         confirm_msg = (
-                            f"✨ ¡Listo! A partir de ahora te llamaré *{updated_name}*.\n"
-                            f"🆔 Tu identificador único es `{user.user_code}`."
+                            f"✓ Nombre actualizado: *{updated_name}*\n"
+                            f"▪ ID Usuario: `{user.user_code}`"
                         )
                         await whatsapp.send_text(phone, confirm_msg)
                         return {"status": "processed"}
@@ -235,25 +244,28 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         else:
             result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
             if result_type == "budget":
-                reply = f"✅ Presupuesto mensual configurado, {user.name}: ${value:,.2f}"
+                reply = f"✓ Presupuesto mensual configurado, {user.name}: ${value:,.2f}"
             elif result_type == "unrecognized":
                 reply = (
-                    f"👋 ¡Hola {user.name}! No detecté un gasto ni consulta.\n\n"
-                    "📌 *Opciones útiles:*\n"
-                    "• Ver tus compras: `¿cuáles son mis compras?` o `compras agosto`\n"
-                    "• Consultar saldo: `saldo` o `¿cuánto me queda?`\n"
+                    f"[!] Hola {user.name}, no detecté un gasto ni consulta.\n\n"
+                    "▪ *Opciones disponibles:*\n"
+                    "• Ver compras: `mis compras` o `compras agosto`\n"
+                    "• Consultar saldo: `saldo` o `cuanto me queda`\n"
                     "• Registrar gasto: `Almuerzo 4500`\n"
                     "• Presupuesto: `Presupuesto 500000`\n"
-                    "• Cambiar tu nombre: `Me llamo [Nombre]`\n"
-                    "• Ver guía completa: `ayuda`"
+                    "• Cambiar nombre: `Me llamo [Nombre]`\n"
+                    "• Ver ayuda: `ayuda`"
                 )
             else:
-                reply = f"✅ Gasto registrado, {user.name}: ${extraction.total_spent:,.2f}\nRestante disponible: ${value:,.2f}"
+                reply = (
+                    f"✓ Gasto registrado, {user.name}: ${extraction.total_spent:,.2f}\n"
+                    f"▪ Saldo disponible: ${value:,.2f}"
+                )
 
         # Si es un usuario recién creado, darle una bienvenida introductoria
         if is_new_user and result_type != "budget":
             reply = (
-                f"👋 *¡Mucho gusto, {user.name}!* Te he registrado en JaviBot con el ID `{user.user_code}`.\n\n"
+                f"✓ *Bienvenido/a, {user.name}* (ID: `{user.user_code}`)\n\n"
                 + reply
             )
 
@@ -265,7 +277,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         print(f"--> [WEBHOOK] ValueError: {exc}")
         if phone:
             try:
-                await whatsapp.send_text(phone, f"⚠️ {exc}")
+                await whatsapp.send_text(phone, f"[!] {exc}")
             except Exception as send_err:
                 print(f"--> [WEBHOOK] Error al enviar mensaje de aviso: {send_err}")
         return {"status": f"handled_error: {exc}"}
@@ -274,7 +286,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         traceback.print_exc()
         if phone and ("503" in str(exc) or "UNAVAILABLE" in str(exc)):
             try:
-                await whatsapp.send_text(phone, "⏳ En este momento el servicio de IA tiene alta demanda momentánea. Por favor, reenvía tu mensaje en unos segundos.")
+                await whatsapp.send_text(phone, "[!] El servicio de IA tiene alta demanda momentánea. Por favor, reenvía tu mensaje en unos segundos.")
             except Exception:
                 pass
         return {"status": f"error: {type(exc).__name__} - {exc}"}
