@@ -206,7 +206,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 return {"status": "duplicate_ignored"}
 
             db.add(ProcessedMessage(message_id=msg_id))
-            await db.flush()
+            await db.commit()
 
         # Extraer nombre del perfil de WhatsApp si viene en el webhook
         contacts = value.get("contacts", [])
@@ -414,6 +414,17 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
 
         extraction = await extractor.extract(input_type, content, mime_type)
         print(f"--> [WEBHOOK] Extracción Gemini: {extraction}")
+
+        # Una imagen es SIEMPRE un comprobante de gasto, nunca una consulta de lista ni saldo
+        if input_type == "image":
+            extraction.is_expense_list_inquiry = False
+            extraction.is_balance_inquiry = False
+            extraction.is_budget_setup = False
+
+        # Si se extrajo un monto o ítems, tiene prioridad absoluta como registro de gasto
+        if extraction.total_spent > 0 or extraction.items:
+            extraction.is_expense_list_inquiry = False
+            extraction.is_balance_inquiry = False
 
         if extraction.is_balance_inquiry:
             result_type = "balance"
