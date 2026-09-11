@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str = ""
     whatsapp_api_version: str = "v23.0"
     encryption_secret: str = "botgastos-secret-encryption-key-32bytes"
-    admin_phone: str = "56932632445"
+    admin_phone: str = ""
     access_mode: str = "whitelist"
     allow_free_trial: bool = False
     free_trial_max_expenses: int = 5
