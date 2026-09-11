@@ -224,32 +224,27 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         if input_type == "text":
             raw_text = message.get("text", {}).get("body", "").strip()
             if is_admin_phone(phone) or user.is_admin:
-                admin_reply = await handle_admin_command(db, phone, raw_text)
-                if admin_reply:
+                admin_res = await handle_admin_command(db, phone, raw_text)
+                if admin_res:
+                    admin_reply, target_u, target_num = admin_res
                     print(f"--> [WEBHOOK] Comando admin ejecutado por {phone}: {admin_reply}")
                     await whatsapp.send_text(phone, admin_reply)
 
-                    # Si el comando fue autorizar, notificar también al usuario autorizado
-                    norm_cmd = raw_text.lower().strip()
-                    if norm_cmd.startswith("autorizar ") or norm_cmd.startswith("activar "):
-                        parts = raw_text.split()
-                        if len(parts) >= 2:
-                            target_num = parts[1]
-                            try:
-                                target_u = await get_user_by_phone(db, target_num)
-                                if target_u:
-                                    client_welcome = (
-                                        f"✓ *¡Hola {target_u.name}! Tu acceso a JaviBot ha sido activado.*\n"
-                                        f"▪ ID Usuario: `{target_u.user_code}`\n\n"
-                                        "Ya puedes comenzar a usar el servicio:\n"
-                                        "• *Configura tu presupuesto:* `Presupuesto 500000`\n"
-                                        "• *Registra un gasto:* `Almuerzo 4500` (o envía audio/foto)\n"
-                                        "• *Consulta tu saldo:* `saldo`\n"
-                                        "• *Ver ayuda:* `ayuda`"
-                                    )
-                                    await whatsapp.send_text(target_num, client_welcome)
-                            except Exception as notify_err:
-                                print(f"--> [WEBHOOK] Error al notificar bienvenida al cliente: {notify_err}")
+                    # Si se autorizó exitosamente a un usuario, enviar mensaje de bienvenida directo a su WhatsApp
+                    if target_u and target_num:
+                        try:
+                            client_welcome = (
+                                f"✓ *¡Hola {target_u.name}! Tu acceso a JaviBot ha sido activado.*\n"
+                                f"▪ ID Usuario: `{target_u.user_code}`\n\n"
+                                "Ya puedes comenzar a usar el servicio:\n"
+                                "• *Configura tu presupuesto:* `Presupuesto 500000`\n"
+                                "• *Registra un gasto:* `Almuerzo 4500` (o envía audio/foto)\n"
+                                "• *Consulta tu saldo:* `saldo`\n"
+                                "• *Ver ayuda:* `ayuda`"
+                            )
+                            await whatsapp.send_text(target_num, client_welcome)
+                        except Exception as notify_err:
+                            print(f"--> [WEBHOOK] Error al notificar bienvenida al cliente: {notify_err}")
 
                     return {"status": "processed"}
 

@@ -103,6 +103,23 @@ async def init_db() -> None:
             )
         )
 
+        # Corregir activación de Niki (56961124124) y limpiar usuario fantasma por error de tipeo (5691124124)
+        niki_hash = hash_phone("56961124124")
+        await connection.execute(
+            text(
+                "UPDATE users SET status = 'ACTIVE', name = 'Niki' "
+                "WHERE phone_hash = :hash OR user_code = 'JB-1455D61E'"
+            ),
+            {"hash": niki_hash},
+        )
+        ghost_hash = hash_phone("5691124124")
+        await connection.execute(
+            text(
+                "DELETE FROM users WHERE (phone_hash = :hash OR phone_number = '5691124124') AND name = 'Amigo'"
+            ),
+            {"hash": ghost_hash},
+        )
+
 
 if __name__ == "__main__":
     asyncio.run(init_db())
