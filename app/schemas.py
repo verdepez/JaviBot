@@ -11,6 +11,7 @@ class ExtractedItem(BaseModel):
 
 class ExtractionResult(BaseModel):
     is_budget_setup: bool = False
+    is_balance_inquiry: bool = False
     budget_amount: float | None = Field(default=None, ge=0)
     items: list[ExtractedItem] = Field(default_factory=list)
     total_spent: float = Field(default=0, ge=0)

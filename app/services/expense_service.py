@@ -37,6 +37,9 @@ async def record_extraction(
         await db.commit()
         return "budget", budget.total_budget
 
+    if extraction.is_balance_inquiry:
+        return "balance", Decimal("0")
+
     # Si no es configuración de presupuesto ni se detectó un gasto real
     if not extraction.items and extraction.total_spent <= 0:
         return "unrecognized", Decimal("0")
@@ -77,3 +80,38 @@ async def record_extraction(
     )
     remaining = budget.total_budget - (spent or Decimal("0"))
     return "expense", remaining
+
+
+async def get_monthly_summary(db: AsyncSession, phone_number: str) -> dict:
+    user = await db.scalar(select(User).where(User.phone_number == phone_number))
+    month = active_month()
+    if user is None:
+        return {"has_budget": False, "month": month}
+
+    budget = await db.scalar(select(Budget).where(Budget.user_id == user.id, Budget.month_year == month))
+    if budget is None:
+        return {"has_budget": False, "month": month}
+
+    spent = await db.scalar(
+        select(func.coalesce(func.sum(Expense.total_amount), Decimal("0"))).where(Expense.budget_id == budget.id)
+    ) or Decimal("0")
+
+    expense_count = await db.scalar(
+        select(func.count(Expense.id)).where(Expense.budget_id == budget.id)
+    ) or 0
+
+    savings = await db.scalar(
+        select(func.coalesce(func.sum(SavingsVault.amount_saved), Decimal("0"))).where(SavingsVault.user_id == user.id)
+    ) or Decimal("0")
+
+    remaining = budget.total_budget - spent
+
+    return {
+        "has_budget": True,
+        "month": month,
+        "total_budget": budget.total_budget,
+        "spent": spent,
+        "remaining": remaining,
+        "savings": savings,
+        "expense_count": expense_count,
+    }
