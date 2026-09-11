@@ -310,3 +310,38 @@ async def get_expense_list(
         "remaining": remaining,
         "expenses": expenses,
     }
+
+
+async def delete_last_expense(db: AsyncSession, phone_number: str) -> tuple[bool, str]:
+    user = await get_user_by_phone(db, phone_number)
+    if not user:
+        return False, "[!] No se encontró tu cuenta de usuario."
+
+    current = active_month()
+    budget = await db.scalar(select(Budget).where(Budget.user_id == user.id, Budget.month_year == current))
+    if not budget:
+        return False, f"[!] No tienes un presupuesto activo para este mes ({current})."
+
+    stmt = (
+        select(Expense)
+        .options(selectinload(Expense.items))
+        .where(Expense.budget_id == budget.id)
+        .order_by(Expense.id.desc())
+        .limit(1)
+    )
+    last_exp = await db.scalar(stmt)
+    if not last_exp:
+        return False, "[!] No tienes compras registradas en este mes para deshacer."
+
+    deleted_amount = last_exp.total_amount
+    items_desc = ", ".join(it.item_name for it in last_exp.items) if last_exp.items else "Gasto"
+    await db.delete(last_exp)
+    await db.commit()
+
+    summary = await get_monthly_summary(db, phone_number)
+    return (
+        True,
+        f"✓ *Gasto eliminado con éxito*, {user.name}:\n"
+        f"▪ Detalle: {items_desc} (${deleted_amount:,.2f})\n"
+        f"▪ Saldo disponible actualizado: *${summary['remaining']:,.2f}*"
+    )

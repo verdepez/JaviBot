@@ -1,11 +1,17 @@
+import time
 import traceback
+from collections import OrderedDict
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db import get_db
+from app.models import ProcessedMessage
 from app.services.admin_service import handle_admin_command, is_admin_phone
 from app.services.expense_service import (
+    delete_last_expense,
     get_expense_list,
     get_monthly_summary,
     get_or_create_user,
@@ -19,6 +25,24 @@ from app.services.whatsapp_service import WhatsAppClient
 router = APIRouter(prefix="/webhook", tags=["whatsapp"])
 extractor = GeminiExtractor()
 whatsapp = WhatsAppClient()
+
+# Cache en memoria para deduplicación instantánea de reintentos concurrentes de Meta
+_seen_message_ids: OrderedDict[str, float] = OrderedDict()
+_CACHE_MAX_SIZE = 2000
+_CACHE_TTL_SECONDS = 3600  # 1 hora
+
+
+def is_duplicate_message_id(msg_id: str) -> bool:
+    now = time.time()
+    if len(_seen_message_ids) > _CACHE_MAX_SIZE:
+        cutoff = now - _CACHE_TTL_SECONDS
+        while _seen_message_ids and next(iter(_seen_message_ids.values())) < cutoff:
+            _seen_message_ids.popitem(last=False)
+
+    if msg_id in _seen_message_ids:
+        return True
+    _seen_message_ids[msg_id] = now
+    return False
 
 
 def get_help_message(user_name: str, user_code: str) -> str:
@@ -42,7 +66,9 @@ def get_help_message(user_name: str, user_code: str) -> str:
         "[5] *Personalizar tu nombre:*\n"
         "• Enviar: `Me llamo Carlos` (o tu nombre preferido)\n\n"
         "[6] *Ver esta ayuda:*\n"
-        "• Enviar: `ayuda` o `menu`"
+        "• Enviar: `ayuda` o `menu`\n\n"
+        "[7] *Deshacer último gasto:*\n"
+        "• Enviar: `deshacer` o `eliminar ultimo gasto`"
     )
 
 
@@ -164,6 +190,23 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         phone = message.get("from")
         if not phone:
             return {"status": "ignored"}
+
+        # Deduplicación por WhatsApp Message ID (wamid) para ignorar reintentos de Meta
+        msg_id = message.get("id")
+        if msg_id:
+            # 1. Chequeo rápido en memoria (evita carreras y reintentos concurrentes en milisegundos)
+            if is_duplicate_message_id(msg_id):
+                print(f"--> [WEBHOOK] Mensaje duplicado detectado en memoria ({msg_id}). Ignorando.")
+                return {"status": "duplicate_ignored"}
+
+            # 2. Chequeo persistente en base de datos
+            existing_pm = await db.scalar(select(ProcessedMessage).where(ProcessedMessage.message_id == msg_id))
+            if existing_pm is not None:
+                print(f"--> [WEBHOOK] Mensaje duplicado detectado en BD ({msg_id}). Ignorando.")
+                return {"status": "duplicate_ignored"}
+
+            db.add(ProcessedMessage(message_id=msg_id))
+            await db.flush()
 
         # Extraer nombre del perfil de WhatsApp si viene en el webhook
         contacts = value.get("contacts", [])
@@ -347,6 +390,18 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 print(f"--> [WEBHOOK] Consultando resumen directo para {user.name}")
                 summary = await get_monthly_summary(db, phone, profile_name)
                 await whatsapp.send_text(phone, format_summary(summary))
+                return {"status": "processed"}
+
+            # Comandos para deshacer o borrar el último gasto
+            undo_triggers = (
+                "deshacer", "eliminar gasto", "borrar gasto", "eliminar ultimo gasto",
+                "eliminar último gasto", "borrar ultimo gasto", "borrar último gasto",
+                "cancelar gasto", "anular gasto"
+            )
+            if norm in undo_triggers:
+                print(f"--> [WEBHOOK] Deshaciendo último gasto para {user.name}")
+                success, msg = await delete_last_expense(db, phone)
+                await whatsapp.send_text(phone, msg)
                 return {"status": "processed"}
         elif input_type in {"audio", "image"}:
             media_id = message.get(input_type, {}).get("id")

@@ -65,6 +65,35 @@ async def init_db() -> None:
                 {"hash": admin_hash},
             )
 
+        # Asegurar tabla processed_messages
+        await connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS processed_messages (
+                    id SERIAL PRIMARY KEY,
+                    message_id VARCHAR(128) UNIQUE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_processed_messages_message_id ON processed_messages (message_id);
+                """
+            )
+        )
+
+        # Limpieza automática de gastos duplicados producidos por reintentos de webhook
+        # (mismo presupuesto, mismo monto, creados con menos de 180 segundos de diferencia)
+        await connection.execute(
+            text(
+                """
+                DELETE FROM expenses e1
+                USING expenses e2
+                WHERE e1.budget_id = e2.budget_id
+                  AND e1.total_amount = e2.total_amount
+                  AND e1.id > e2.id
+                  AND ABS(EXTRACT(EPOCH FROM (e1.created_at - e2.created_at))) < 180;
+                """
+            )
+        )
+
 
 if __name__ == "__main__":
     asyncio.run(init_db())
