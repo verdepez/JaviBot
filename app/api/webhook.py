@@ -4,10 +4,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db import get_db
+from app.services.admin_service import handle_admin_command, is_admin_phone
 from app.services.expense_service import (
     get_expense_list,
     get_monthly_summary,
     get_or_create_user,
+    get_user_by_phone,
     record_extraction,
     update_user_name,
 )
@@ -175,6 +177,132 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         input_type = message.get("type")
         print(f"--> [WEBHOOK] Procesando mensaje de {user.name} ({user.user_code}) tipo {input_type}")
 
+        # 1. Comandos de Administrador / Dueño (si el remitente es admin)
+        if input_type == "text":
+            raw_text = message.get("text", {}).get("body", "").strip()
+            if is_admin_phone(phone) or user.is_admin:
+                admin_reply = await handle_admin_command(db, phone, raw_text)
+                if admin_reply:
+                    print(f"--> [WEBHOOK] Comando admin ejecutado por {phone}: {admin_reply}")
+                    await whatsapp.send_text(phone, admin_reply)
+
+                    # Si el comando fue autorizar, notificar también al usuario autorizado
+                    norm_cmd = raw_text.lower().strip()
+                    if norm_cmd.startswith("autorizar ") or norm_cmd.startswith("activar "):
+                        parts = raw_text.split()
+                        if len(parts) >= 2:
+                            target_num = parts[1]
+                            try:
+                                target_u = await get_user_by_phone(db, target_num)
+                                if target_u:
+                                    client_welcome = (
+                                        f"✓ *¡Hola {target_u.name}! Tu acceso a JaviBot ha sido activado.*\n"
+                                        f"▪ ID Usuario: `{target_u.user_code}`\n\n"
+                                        "Ya puedes comenzar a usar el servicio:\n"
+                                        "• *Configura tu presupuesto:* `Presupuesto 500000`\n"
+                                        "• *Registra un gasto:* `Almuerzo 4500` (o envía audio/foto)\n"
+                                        "• *Consulta tu saldo:* `saldo`\n"
+                                        "• *Ver ayuda:* `ayuda`"
+                                    )
+                                    await whatsapp.send_text(target_num, client_welcome)
+                            except Exception as notify_err:
+                                print(f"--> [WEBHOOK] Error al notificar bienvenida al cliente: {notify_err}")
+
+                    return {"status": "processed"}
+
+        # 2. Control de Acceso: Verificar si el usuario está bloqueado
+        if user.status == "BLOCKED":
+            print(f"--> [WEBHOOK] Usuario bloqueado intentó acceder: {phone}")
+            await whatsapp.send_text(
+                phone,
+                "[!] *Acceso inactivo*\n"
+                "──────────────────────────\n"
+                f"Hola {user.name}, tu cuenta se encuentra suspendida o inactiva.\n"
+                "▪ Para reactivar tu servicio o resolver dudas, por favor comunícate con el administrador."
+            )
+            return {"status": "processed"}
+
+        # 3. Control de Acceso: Si el usuario NO está activo y NO es admin
+        is_in_trial = False
+        if user.status != "ACTIVE" and not user.is_admin:
+            is_hire_request = False
+            if input_type == "text":
+                text_content = message.get("text", {}).get("body", "").strip()
+                norm_text = text_content.lower().strip().strip("¿?¡!.,")
+                hire_triggers = {
+                    "si", "sí", "quiero", "contratar", "quiero contratar", "me interesa",
+                    "suscribir", "suscribirme", "deseo contratar", "si quiero", "sí quiero",
+                    "comprar", "activar", "plan"
+                }
+                if norm_text in hire_triggers or any(norm_text.startswith(t + " ") for t in ("si", "sí", "quiero", "contratar")):
+                    is_hire_request = True
+
+            # Si el prospecto confirma interés en contratar
+            if is_hire_request:
+                user.status = "PENDING"
+                await db.commit()
+                print(f"--> [WEBHOOK] Prospecto registrado: {user.name} ({phone})")
+
+                prospect_reply = (
+                    "■ *SOLICITUD RECIBIDA* | JaviBot\n"
+                    "──────────────────────────\n"
+                    f"✓ ¡Gracias por tu interés, *{user.name}*!\n"
+                    "▪ Hemos registrado tu solicitud de activación.\n"
+                    "▪ Nos comunicaremos contigo a la brevedad para coordinar el pago y activar tu servicio.\n\n"
+                    f"▪ ID Solicitud: `{user.user_code}`"
+                )
+                await whatsapp.send_text(phone, prospect_reply)
+
+                # Notificación automática al Dueño / Administrador
+                if settings.admin_phone:
+                    clean_adm = settings.admin_phone.strip().lstrip("+")
+                    admin_lead_msg = (
+                        "■ *NUEVO CLIENTE INTERESADO*\n"
+                        "──────────────────────────\n"
+                        f"▪ Nombre: *{user.name}*\n"
+                        f"▪ Teléfono: `{phone}`\n"
+                        f"▪ ID Código: `{user.user_code}`\n\n"
+                        "▸ Para activar su acceso tras recibir el pago, responde:\n"
+                        f"`autorizar {phone}`"
+                    )
+                    try:
+                        await whatsapp.send_text(clean_adm, admin_lead_msg)
+                    except Exception as adm_err:
+                        print(f"--> [WEBHOOK] Error al notificar al admin sobre prospecto: {adm_err}")
+
+                return {"status": "processed"}
+
+            # Modelo C: Verificar período de prueba gratuita si está activado
+            if settings.allow_free_trial:
+                if user.trial_expense_count >= settings.free_trial_max_expenses:
+                    trial_ended_msg = (
+                        f"[!] *Período de prueba finalizado*, {user.name}.\n"
+                        "──────────────────────────\n"
+                        f"Has alcanzado el límite de {settings.free_trial_max_expenses} registros de prueba gratuita.\n\n"
+                        "▸ Para continuar utilizando JaviBot de forma ilimitada, responde *SI* para contratar tu plan mensual."
+                    )
+                    await whatsapp.send_text(phone, trial_ended_msg)
+                    return {"status": "processed"}
+                else:
+                    is_in_trial = True
+
+            if not is_in_trial:
+                # Modo Lista Blanca Estricto: Mensaje de presentación de servicio (Cero llamadas a Gemini)
+                pitch_msg = (
+                    "■ *JAVIBOT* | Control de Gastos Inteligente\n"
+                    "──────────────────────────\n"
+                    f"Hola *{user.name}*, este es un servicio privado de gestión financiera y control de gastos personales vía WhatsApp asistido por IA.\n\n"
+                    "▪ *Características principales:*\n"
+                    "• Registro inmediato por texto, nota de voz o foto de boleta\n"
+                    "• Control de presupuesto mensual y saldo disponible\n"
+                    "• Detalle de compras mensuales y consultas históricas\n"
+                    "• Privacidad y datos cifrados\n\n"
+                    "▸ *¿Deseas contratar el servicio?*\n"
+                    "Responde *SI* para coordinar tu activación y método de pago."
+                )
+                await whatsapp.send_text(phone, pitch_msg)
+                return {"status": "processed"}
+
         # Atajos rápidos de texto (sin llamar a Gemini: respuesta instantánea)
         if input_type == "text":
             content = message.get("text", {}).get("body", "").strip()
@@ -261,6 +389,10 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     f"✓ Gasto registrado, {user.name}: ${extraction.total_spent:,.2f}\n"
                     f"▪ Saldo disponible: ${value:,.2f}"
                 )
+                if is_in_trial:
+                    user.trial_expense_count += 1
+                    await db.commit()
+                    reply += f"\n\n▸ *Uso de prueba:* {user.trial_expense_count}/{settings.free_trial_max_expenses} registros."
 
         # Si es un usuario recién creado, darle una bienvenida introductoria
         if is_new_user and result_type != "budget":

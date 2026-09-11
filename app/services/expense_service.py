@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.security import clean_first_name, encrypt_phone, generate_user_code, hash_phone
 from app.models import Budget, Expense, ExpenseItem, SavingsVault, User
 from app.schemas import ExtractionResult
@@ -63,24 +64,41 @@ def resolve_target_month(raw: str | None) -> str:
 
 
 
+async def get_user_by_phone(db: AsyncSession, phone_number: str) -> User | None:
+    clean_p = phone_number.strip().lstrip("+")
+    p_hash = hash_phone(clean_p)
+    user = await db.scalar(select(User).where(User.phone_hash == p_hash))
+    if user is None:
+        user = await db.scalar(select(User).where(User.phone_number == clean_p))
+    return user
+
+
 async def get_or_create_user(
     db: AsyncSession,
     phone_number: str,
     profile_name: str | None = None,
+    initial_status: str | None = None,
 ) -> tuple[User, bool]:
-    p_hash = hash_phone(phone_number)
+    clean_p = phone_number.strip().lstrip("+")
+    clean_admin = settings.admin_phone.strip().lstrip("+") if settings.admin_phone else ""
+    is_admin_user = bool(clean_admin and clean_p == clean_admin)
+
+    p_hash = hash_phone(clean_p)
     user = await db.scalar(select(User).where(User.phone_hash == p_hash))
 
     # Retrocompatibilidad: buscar por phone_number anterior si no se encontró por hash
     if user is None:
-        user = await db.scalar(select(User).where(User.phone_number == phone_number))
+        user = await db.scalar(select(User).where(User.phone_number == clean_p))
         if user is not None:
             user.phone_hash = p_hash
-            user.encrypted_phone = encrypt_phone(phone_number)
+            user.encrypted_phone = encrypt_phone(clean_p)
             if not user.name:
                 user.name = clean_first_name(profile_name)
             if not user.user_code:
-                user.user_code = generate_user_code(phone_number, user.name)
+                user.user_code = generate_user_code(clean_p, user.name)
+            if is_admin_user:
+                user.is_admin = True
+                user.status = "ACTIVE"
             await db.flush()
             return user, False
 
@@ -88,20 +106,37 @@ async def get_or_create_user(
     if user is None:
         is_new = True
         name = clean_first_name(profile_name)
-        code = generate_user_code(phone_number, name)
+        code = generate_user_code(clean_p, name)
+
+        if is_admin_user:
+            user_status = "ACTIVE"
+        elif initial_status:
+            user_status = initial_status
+        elif settings.access_mode == "whitelist":
+            user_status = "PENDING"
+        else:
+            user_status = "ACTIVE"
+
         user = User(
             phone_hash=p_hash,
-            encrypted_phone=encrypt_phone(phone_number),
+            encrypted_phone=encrypt_phone(clean_p),
             name=name,
             user_code=code,
             phone_number=None,
+            status=user_status,
+            is_admin=is_admin_user,
         )
         db.add(user)
         await db.flush()
-    elif profile_name and user.name in ("Amigo", "", None):
-        user.name = clean_first_name(profile_name)
-        user.user_code = generate_user_code(phone_number, user.name)
-        await db.flush()
+    else:
+        if is_admin_user and (not user.is_admin or user.status != "ACTIVE"):
+            user.is_admin = True
+            user.status = "ACTIVE"
+            await db.flush()
+        if profile_name and user.name in ("Amigo", "", None):
+            user.name = clean_first_name(profile_name)
+            user.user_code = generate_user_code(clean_p, user.name)
+            await db.flush()
 
     return user, is_new
 

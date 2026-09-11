@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -15,6 +15,10 @@ class User(Base):
     encrypted_phone: Mapped[str] = mapped_column(String(255))
     name: Mapped[str] = mapped_column(String(100), default="Amigo")
     user_code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="ACTIVE")  # ACTIVE, PENDING, BLOCKED, TRIAL
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    trial_expense_count: Mapped[int] = mapped_column(Integer, default=0)
+    notes: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Campo opcional para retrocompatibilidad con bases de datos anteriores
     phone_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

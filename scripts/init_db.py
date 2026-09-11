@@ -3,6 +3,7 @@ from sqlalchemy import text
 
 from app.db import Base, engine
 from app import models  # noqa: F401
+from app.core.config import settings
 from app.core.security import encrypt_phone, generate_user_code, hash_phone
 
 
@@ -22,6 +23,10 @@ async def init_db() -> None:
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS encrypted_phone VARCHAR(255);
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(100) DEFAULT 'Amigo';
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS user_code VARCHAR(32);
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'ACTIVE';
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_expense_count INTEGER DEFAULT 0;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS notes VARCHAR(255);
                         -- Permitir nulo en phone_number anterior
                         IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'phone_number') THEN
                             ALTER TABLE users ALTER COLUMN phone_number DROP NOT NULL;
@@ -50,6 +55,15 @@ async def init_db() -> None:
         # Crear índices únicos
         await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_phone_hash ON users (phone_hash);"))
         await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_user_code ON users (user_code);"))
+
+        # Asegurar privilegios de admin para settings.admin_phone si está configurado
+        if settings.admin_phone:
+            clean_admin = settings.admin_phone.strip().lstrip("+")
+            admin_hash = hash_phone(clean_admin)
+            await connection.execute(
+                text("UPDATE users SET is_admin = TRUE, status = 'ACTIVE' WHERE phone_hash = :hash"),
+                {"hash": admin_hash},
+            )
 
 
 if __name__ == "__main__":
