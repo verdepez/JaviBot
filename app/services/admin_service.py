@@ -3,19 +3,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.security import clean_first_name, decrypt_phone, encrypt_phone, generate_user_code, hash_phone
+from app.core.security import (
+    clean_first_name,
+    decrypt_phone,
+    encrypt_phone,
+    generate_user_code,
+    hash_phone,
+    normalize_phone,
+)
 from app.models import User
 
 
-def clean_phone_str(raw: str) -> str:
-    """Elimina caracteres no numéricos excepto si viene con +."""
-    digits = re.sub(r"[^\d]", "", raw)
-    return digits
-
-
 def is_admin_phone(phone: str) -> bool:
-    clean_p = clean_phone_str(phone)
-    clean_admin = clean_phone_str(settings.admin_phone) if settings.admin_phone else ""
+    clean_p = normalize_phone(phone)
+    clean_admin = normalize_phone(settings.admin_phone) if settings.admin_phone else ""
     return bool(clean_admin and clean_p == clean_admin)
 
 
@@ -54,7 +55,7 @@ async def authorize_user(
     - Si no existe y se suministra un teléfono válido de >= 9 dígitos, crea y activa al usuario.
     """
     target_clean = target.strip()
-    target_digits = clean_phone_str(target_clean)
+    target_digits = normalize_phone(target_clean)
     found_user: User | None = None
     real_phone: str = ""
 
@@ -167,7 +168,7 @@ async def authorize_user(
 
 async def block_user(db: AsyncSession, target: str) -> tuple[User | None, str]:
     target_clean = target.strip()
-    target_digits = clean_phone_str(target_clean)
+    target_digits = normalize_phone(target_clean)
 
     found_user: User | None = None
     real_phone: str = ""
@@ -250,7 +251,7 @@ async def handle_admin_command(
     Retorna (mensaje_para_admin, usuario_autorizado_o_None, telefono_usuario_o_None) o None.
     """
     if not is_admin_phone(admin_phone):
-        clean_p = clean_phone_str(admin_phone)
+        clean_p = normalize_phone(admin_phone)
         p_hash = hash_phone(clean_p)
         u = await db.scalar(select(User).where(User.phone_hash == p_hash))
         if not (u and u.is_admin):

@@ -11,10 +11,10 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    phone_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    phone_hash: Mapped[str] = mapped_column(String(64), unique=True)
     encrypted_phone: Mapped[str] = mapped_column(String(255))
     name: Mapped[str] = mapped_column(String(100), default="Amigo")
-    user_code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    user_code: Mapped[str] = mapped_column(String(32), unique=True)
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", index=True)  # ACTIVE, PENDING, BLOCKED, TRIAL
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     trial_expense_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -32,7 +32,7 @@ class Budget(Base):
     __table_args__ = (UniqueConstraint("user_id", "month_year", name="uq_budget_user_month"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     month_year: Mapped[str] = mapped_column(String(7), index=True)
     total_budget: Mapped[Decimal] = mapped_column(Numeric(14, 2))
 
@@ -42,13 +42,16 @@ class Budget(Base):
 
 class Expense(Base):
     __tablename__ = "expenses"
-    __table_args__ = (Index("ix_expenses_budget_created", "budget_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_expenses_budget_created", "budget_id", "created_at"),
+        Index("ix_expenses_budget_amount", "budget_id", "total_amount"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    budget_id: Mapped[int] = mapped_column(ForeignKey("budgets.id", ondelete="CASCADE"), index=True)
+    budget_id: Mapped[int] = mapped_column(ForeignKey("budgets.id", ondelete="CASCADE"))
     raw_input_type: Mapped[str] = mapped_column(String(20))
     total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     budget: Mapped[Budget] = relationship(back_populates="expenses")
     items: Mapped[list["ExpenseItem"]] = relationship(back_populates="expense", cascade="all, delete-orphan")
@@ -56,9 +59,12 @@ class Expense(Base):
 
 class ExpenseItem(Base):
     __tablename__ = "expense_items"
+    __table_args__ = (
+        Index("ix_expense_items_expense_category", "expense_id", "category"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    expense_id: Mapped[int] = mapped_column(ForeignKey("expenses.id", ondelete="CASCADE"), index=True)
+    expense_id: Mapped[int] = mapped_column(ForeignKey("expenses.id", ondelete="CASCADE"))
     item_name: Mapped[str] = mapped_column(String(255))
     quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3))
     unit_price: Mapped[Decimal] = mapped_column(Numeric(14, 2))
@@ -70,9 +76,12 @@ class ExpenseItem(Base):
 
 class SavingsVault(Base):
     __tablename__ = "savings_vault"
+    __table_args__ = (
+        Index("ix_savings_vault_user_amount", "user_id", "amount_saved"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     amount_saved: Mapped[Decimal] = mapped_column(Numeric(14, 2))
     reason: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -84,5 +93,5 @@ class ProcessedMessage(Base):
     __tablename__ = "processed_messages"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    message_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    message_id: Mapped[str] = mapped_column(String(128), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

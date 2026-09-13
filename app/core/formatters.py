@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 
-def format_currency(amount: float | Decimal | int | None, phone: str | None = None) -> str:
+def format_currency(amount: float | Decimal | int | None) -> str:
     """
     Formatea el monto en formato monetario chileno:
     - Símbolo '$' al inicio a la izquierda.

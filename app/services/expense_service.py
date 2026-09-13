@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -7,9 +7,11 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.formatters import format_currency
-from app.core.security import clean_first_name, encrypt_phone, generate_user_code, hash_phone
+from app.core.security import clean_first_name, encrypt_phone, generate_user_code, hash_phone, normalize_phone
+from app.core.timezone import get_current_month
 from app.models import Budget, Expense, ExpenseItem, SavingsVault, User
 from app.schemas import ExtractionResult
+
 
 MONTHS_MAP = {
     "enero": "01",
@@ -29,7 +31,7 @@ MONTHS_MAP = {
 
 
 def active_month() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m")
+    return get_current_month()
 
 
 def resolve_target_month(raw: str | None) -> str:
@@ -66,7 +68,7 @@ def resolve_target_month(raw: str | None) -> str:
 
 
 async def get_user_by_phone(db: AsyncSession, phone_number: str) -> User | None:
-    clean_p = phone_number.strip().lstrip("+")
+    clean_p = normalize_phone(phone_number)
     p_hash = hash_phone(clean_p)
     user = await db.scalar(select(User).where(User.phone_hash == p_hash))
     if user is None:
@@ -80,8 +82,8 @@ async def get_or_create_user(
     profile_name: str | None = None,
     initial_status: str | None = None,
 ) -> tuple[User, bool]:
-    clean_p = phone_number.strip().lstrip("+")
-    clean_admin = settings.admin_phone.strip().lstrip("+") if settings.admin_phone else ""
+    clean_p = normalize_phone(phone_number)
+    clean_admin = normalize_phone(settings.admin_phone) if settings.admin_phone else ""
     is_admin_user = bool(clean_admin and clean_p == clean_admin)
 
     p_hash = hash_phone(clean_p)
@@ -243,13 +245,13 @@ async def get_monthly_summary(db: AsyncSession, phone_number: str, profile_name:
             "user_code": user.user_code,
         }
 
-    spent = await db.scalar(
-        select(func.coalesce(func.sum(Expense.total_amount), Decimal("0"))).where(Expense.budget_id == budget.id)
-    ) or Decimal("0")
-
-    expense_count = await db.scalar(
-        select(func.count(Expense.id)).where(Expense.budget_id == budget.id)
-    ) or 0
+    summary_res = await db.execute(
+        select(
+            func.coalesce(func.sum(Expense.total_amount), Decimal("0")),
+            func.count(Expense.id),
+        ).where(Expense.budget_id == budget.id)
+    )
+    spent, expense_count = summary_res.one()
 
     savings = await db.scalar(
         select(func.coalesce(func.sum(SavingsVault.amount_saved), Decimal("0"))).where(SavingsVault.user_id == user.id)

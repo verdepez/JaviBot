@@ -4,12 +4,8 @@ from google import genai
 from google.genai import errors, types
 
 from app.core.config import settings
-from app.core.knowledge_base import (
-    categorize_item,
-    parse_amount,
-    try_parse_text_locally,
-)
-from app.schemas import ExtractionResult, ExtractedItem
+from app.core.knowledge_base import try_parse_text_locally
+from app.schemas import ExtractionResult
 from app.services.groq_service import extract_with_groq, transcribe_audio_groq
 
 

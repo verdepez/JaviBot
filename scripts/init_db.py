@@ -52,13 +52,23 @@ async def init_db() -> None:
                     {"hash": p_hash, "enc": p_enc, "code": u_code, "name": u_name, "id": uid},
                 )
 
-        # Crear índices para optimización de consultas de alto rendimiento
+        # Crear índices para optimización de consultas de alto rendimiento (Index-Only Scans y ordenamiento veloz)
         await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_phone_hash ON users (phone_hash);"))
         await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_user_code ON users (user_code);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_users_status ON users (status);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_users_phone_number ON users (phone_number);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_expenses_budget_created ON expenses (budget_id, created_at DESC);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_expenses_budget_amount ON expenses (budget_id, total_amount);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_expense_items_expense_category ON expense_items (expense_id, category);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_expense_items_category ON expense_items (category);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_savings_vault_user_amount ON savings_vault (user_id, amount_saved);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_budgets_month_year ON budgets (month_year);"))
+
+        # Eliminar índices redundantes si existen (ya cubiertos por los índices compuestos)
+        await connection.execute(text("DROP INDEX IF EXISTS ix_expenses_budget_id;"))
+        await connection.execute(text("DROP INDEX IF EXISTS ix_expenses_created_at;"))
+        await connection.execute(text("DROP INDEX IF EXISTS ix_budgets_user_id;"))
+        await connection.execute(text("DROP INDEX IF EXISTS ix_savings_vault_user_id;"))
 
         # Asegurar privilegios de admin para settings.admin_phone si está configurado
         if settings.admin_phone:

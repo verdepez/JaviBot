@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.formatters import format_currency
+from app.core.timezone import get_now
 from app.db import get_db
 from app.models import ProcessedMessage
 from app.services.admin_service import handle_admin_command, is_admin_phone
@@ -19,7 +20,6 @@ from app.services.expense_service import (
     get_expense_list,
     get_monthly_summary,
     get_or_create_user,
-    get_user_by_phone,
     record_extraction,
     update_user_name,
 )
@@ -103,12 +103,7 @@ def format_summary(summary: dict) -> str:
         "▸ *Tip:* Escribe 'compras' para ver el detalle de cada compra o 'ahorro' para consejos de optimización."
     )
 
-    try:
-        from zoneinfo import ZoneInfo
-        cur_day = datetime.now(ZoneInfo("America/Santiago")).day
-    except Exception:
-        cur_day = datetime.now().day
-
+    cur_day = get_now().day
     if summary["total_budget"] > 0:
         pct_spent = summary["spent"] / summary["total_budget"]
         if pct_spent >= Decimal("0.70") and cur_day <= 20:

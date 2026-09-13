@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.formatters import format_currency
+from app.core.timezone import get_now
 from app.models import Budget, Expense
 from app.services.expense_service import active_month, get_or_create_user
 
@@ -123,12 +124,7 @@ async def get_spending_analysis(
     micro_pct = (micro_total / total_spent * Decimal("100")) if total_spent > 0 else Decimal("0")
 
     # Burn Rate y Proyección de fin de mes
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("America/Santiago"))
-    except Exception:
-        now = datetime.now()
-
+    now = get_now()
     current_day = max(1, now.day)
     _, days_in_month = calendar.monthrange(now.year, now.month)
 
@@ -251,3 +247,4 @@ def format_spending_analysis(analysis: dict) -> str:
         f"{primary_advice}\n\n"
         f"{rate_block}"
     )
+
