@@ -211,13 +211,46 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
     raw = text.strip()
     norm = raw.lower().strip(".,¡!¿?")
 
-    # 1. Configuración de Presupuesto
+    # 1. Configuración o Ampliación de Presupuesto
+    # 1a. Ampliación / Abono parcial al presupuesto existente
+    m_budget_add1 = re.search(
+        r"^(?:agregar|sumar|añadir|anadir|abono|abonar|ingreso|aumentar|mas|más)(?:\s+al|\s+a)?(?:\s+mi)?\s+presupuesto(?:\s+mensual)?(?:\s+(?:es\s+de|es|de|:))?\s*\$?([0-9][0-9.,\s]*)$",
+        norm,
+    )
+    if m_budget_add1:
+        amt = parse_amount(m_budget_add1.group(1))
+        if amt:
+            return ExtractionResult(
+                is_budget_setup=True,
+                is_budget_addition=True,
+                budget_amount=amt,
+                total_spent=0,
+                items=[],
+            )
+
+    m_budget_add2 = re.search(
+        r"^(?:agregar|sumar|añadir|anadir|abono|abonar|ingreso|aumentar)\s+(?:de\s+)?\$?([0-9][0-9.,\s]*)\s+(?:al|a\s+mi|al\s+mi|a)?\s*presupuesto(?:\s+mensual)?$",
+        norm,
+    )
+    if m_budget_add2:
+        amt = parse_amount(m_budget_add2.group(1))
+        if amt:
+            return ExtractionResult(
+                is_budget_setup=True,
+                is_budget_addition=True,
+                budget_amount=amt,
+                total_spent=0,
+                items=[],
+            )
+
+    # 1b. Configuración de Presupuesto total
     m_budget = re.search(r"^(?:mi\s+)?presupuesto(?:\s+mensual)?(?:\s+(?:es\s+de|es|de|:))?\s*\$?([0-9][0-9.,\s]*)$", norm)
     if m_budget:
         amt = parse_amount(m_budget.group(1))
         if amt:
             return ExtractionResult(
                 is_budget_setup=True,
+                is_budget_addition=False,
                 budget_amount=amt,
                 total_spent=0,
                 items=[],

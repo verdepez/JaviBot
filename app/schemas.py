@@ -11,6 +11,7 @@ class ExtractedItem(BaseModel):
 
 class ExtractionResult(BaseModel):
     is_budget_setup: bool = False
+    is_budget_addition: bool = False
     is_balance_inquiry: bool = False
     is_expense_list_inquiry: bool = False
     target_month: str | None = None

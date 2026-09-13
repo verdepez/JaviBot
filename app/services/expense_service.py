@@ -165,13 +165,23 @@ async def record_extraction(
     if extraction.is_budget_setup:
         if extraction.budget_amount is None or extraction.budget_amount <= 0:
             raise ValueError(f"Por favor indica un monto válido para tu presupuesto mensual, {user.name} (ej: 'Presupuesto 500000').")
-        if budget is None:
-            budget = Budget(user_id=user.id, month_year=month, total_budget=Decimal(str(extraction.budget_amount)))
-            db.add(budget)
+        amount = Decimal(str(extraction.budget_amount))
+        if extraction.is_budget_addition:
+            if budget is None:
+                budget = Budget(user_id=user.id, month_year=month, total_budget=amount)
+                db.add(budget)
+            else:
+                budget.total_budget += amount
+            await db.commit()
+            return "budget_added", amount, user
         else:
-            budget.total_budget = Decimal(str(extraction.budget_amount))
-        await db.commit()
-        return "budget", budget.total_budget, user
+            if budget is None:
+                budget = Budget(user_id=user.id, month_year=month, total_budget=amount)
+                db.add(budget)
+            else:
+                budget.total_budget = amount
+            await db.commit()
+            return "budget", budget.total_budget, user
 
     if extraction.is_balance_inquiry:
         return "balance", Decimal("0"), user

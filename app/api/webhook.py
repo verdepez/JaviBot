@@ -1,6 +1,8 @@
 import time
 import traceback
 from collections import OrderedDict
+from datetime import datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
@@ -11,6 +13,7 @@ from app.core.formatters import format_currency
 from app.db import get_db
 from app.models import ProcessedMessage
 from app.services.admin_service import handle_admin_command, is_admin_phone
+from app.services.analytics_service import format_spending_analysis, get_spending_analysis
 from app.services.expense_service import (
     delete_last_expense,
     get_expense_list,
@@ -52,8 +55,9 @@ def get_help_message(user_name: str, user_code: str) -> str:
         f"▪ ID Usuario: `{user_code}`\n"
         f"▪ Usuario: *{user_name}*\n"
         "──────────────────────────\n\n"
-        "[1] *Configurar presupuesto:*\n"
-        "• Enviar: `Presupuesto 500000`\n\n"
+        "[1] *Configurar o ampliar presupuesto:*\n"
+        "• *Nuevo presupuesto:* `Presupuesto 500000`\n"
+        "• *Abono parcial:* `Agregar presupuesto 150000` o `Sumar al presupuesto 50000`\n\n"
         "[2] *Registrar gastos diarios:*\n"
         "• *Texto simple:* `Almuerzo 4500` o `Uber 3200`\n"
         "• *Con detalle:* `2 cafés por 3000`\n"
@@ -64,12 +68,14 @@ def get_help_message(user_name: str, user_code: str) -> str:
         "• *Otro mes:* `compras agosto` o `gastos 2026-08`\n\n"
         "[4] *Consultar saldo:*\n"
         "• Enviar: `saldo`, `cuanto me queda` o `resumen`\n\n"
-        "[5] *Personalizar tu nombre:*\n"
+        "[5] *Diagnóstico y consejos de ahorro:*\n"
+        "• Enviar: `ahorro`, `consejos` o `analisis`\n\n"
+        "[6] *Personalizar tu nombre:*\n"
         "• Enviar: `Me llamo Carlos` (o tu nombre preferido)\n\n"
-        "[6] *Ver esta ayuda:*\n"
-        "• Enviar: `ayuda` o `menu`\n\n"
         "[7] *Deshacer último gasto:*\n"
-        "• Enviar: `deshacer` o `eliminar ultimo gasto`"
+        "• Enviar: `deshacer` o `eliminar ultimo gasto`\n\n"
+        "[8] *Ver esta ayuda:*\n"
+        "• Enviar: `ayuda` o `menu`"
     )
 
 
@@ -83,7 +89,8 @@ def format_summary(summary: dict) -> str:
             "▸ `Presupuesto 500000`\n\n"
             f"▪ ID Usuario: `{code}`"
         )
-    return (
+
+    msg = (
         f"■ *RESUMEN MENSUAL* | {name}\n"
         f"▪ Periodo: {summary['month']}\n"
         f"▪ ID Usuario: `{code}`\n"
@@ -93,8 +100,21 @@ def format_summary(summary: dict) -> str:
         f"▪ Saldo Disponible: {format_currency(summary['remaining'])}\n"
         f"▪ Ahorro en Bóveda: {format_currency(summary['savings'])}\n"
         f"▪ Compras Registradas: {summary['expense_count']}\n\n"
-        "▸ *Tip:* Escribe 'compras' para ver el detalle de cada compra o 'ayuda' para más opciones."
+        "▸ *Tip:* Escribe 'compras' para ver el detalle de cada compra o 'ahorro' para consejos de optimización."
     )
+
+    try:
+        from zoneinfo import ZoneInfo
+        cur_day = datetime.now(ZoneInfo("America/Santiago")).day
+    except Exception:
+        cur_day = datetime.now().day
+
+    if summary["total_budget"] > 0:
+        pct_spent = summary["spent"] / summary["total_budget"]
+        if pct_spent >= Decimal("0.70") and cur_day <= 20:
+            msg += "\n\n▸ *Alerta:* Has consumido más del 70% de tu presupuesto. Escribe *'ahorro'* para ver tu diagnóstico y sugerencias de ajuste."
+
+    return msg
 
 
 def format_expense_list(data: dict) -> str:
@@ -388,6 +408,18 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 await whatsapp.send_text(phone, format_summary(summary))
                 return {"status": "processed"}
 
+            # Comandos de diagnóstico financiero y consejos de ahorro
+            analytics_triggers = (
+                "ahorro", "como ahorrar", "cómo ahorrar", "consejos", "consejo",
+                "tips", "tips de ahorro", "analisis", "análisis", "en que gasto mas",
+                "en qué gasto más", "donde gasto mas", "dónde gasto más", "diagnostico", "diagnóstico"
+            )
+            if any(norm == trig or norm.startswith(trig + " ") for trig in analytics_triggers):
+                print(f"--> [WEBHOOK] Solicitando diagnóstico de gastos y ahorro para {user.name}")
+                analysis = await get_spending_analysis(db, phone, profile_name=profile_name)
+                await whatsapp.send_text(phone, format_spending_analysis(analysis))
+                return {"status": "processed"}
+
             # Comandos para deshacer o borrar el último gasto
             undo_triggers = (
                 "deshacer", "eliminar gasto", "borrar gasto", "eliminar ultimo gasto",
@@ -435,14 +467,24 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
             if result_type == "budget":
                 reply = f"✓ Presupuesto mensual configurado, {user.name}: {format_currency(value)}"
+            elif result_type == "budget_added":
+                summary = await get_monthly_summary(db, phone, profile_name)
+                reply = (
+                    f"✓ *Presupuesto ampliado con éxito*, {user.name}!\n"
+                    f"▪ Monto agregado: +{format_currency(value)}\n"
+                    f"▪ Nuevo presupuesto mensual: *{format_currency(summary['total_budget'])}*\n"
+                    f"▪ Saldo disponible actualizado: *{format_currency(summary['remaining'])}*"
+                )
             elif result_type == "unrecognized":
                 reply = (
                     f"[!] Hola {user.name}, no detecté un gasto ni consulta.\n\n"
                     "▪ *Opciones disponibles:*\n"
-                    "• Ver compras: `mis compras` o `compras agosto`\n"
+                    "• Registrar gasto: `Almuerzo 4500` o `Uber 3200`\n"
                     "• Consultar saldo: `saldo` o `cuanto me queda`\n"
-                    "• Registrar gasto: `Almuerzo 4500`\n"
-                    "• Presupuesto: `Presupuesto 500000`\n"
+                    "• Consejos y ahorro: `ahorro` o `consejos`\n"
+                    "• Ver compras: `mis compras` o `compras agosto`\n"
+                    "• Configurar presupuesto: `Presupuesto 500000`\n"
+                    "• Ampliar presupuesto: `Agregar presupuesto 100000`\n"
                     "• Cambiar nombre: `Me llamo [Nombre]`\n"
                     "• Ver ayuda: `ayuda`"
                 )

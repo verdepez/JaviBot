@@ -20,6 +20,7 @@ async def extract_with_groq(
         "Devuelve ÚNICAMENTE un objeto JSON válido que cumpla estrictamente este esquema:\n"
         "{\n"
         '  "is_budget_setup": false,\n'
+        '  "is_budget_addition": false,\n'
         '  "is_balance_inquiry": false,\n'
         '  "is_expense_list_inquiry": false,\n'
         '  "target_month": null,\n'
@@ -29,7 +30,7 @@ async def extract_with_groq(
         "}\n"
         "Categorías válidas: mascotas, educacion, familia, alimentos, hogar_servicios, transporte, salud, ocio, trabajo_insumos, otros.\n"
         "En Chile no se usan centavos en transacciones diarias, los números enteros representan pesos (ej: 45000 son $45.000). "
-        "Si el usuario pide saldo o presupuesto, marca el booleano correspondiente. Si es un gasto, calcula total_spent y los ítems."
+        "Si el usuario pide saldo o presupuesto, marca el booleano correspondiente (si agrega al presupuesto actual, marca is_budget_addition=true). Si es un gasto, calcula total_spent y los ítems."
     )
 
     try:
