@@ -12,9 +12,20 @@ from app.core.config import settings
 from app.core.formatters import format_currency
 from app.core.timezone import get_now
 from app.db import get_db
-from app.models import ProcessedMessage
+from app.models import Company, ProcessedMessage, User
+from app.schemas import ExtractionResult
 from app.services.admin_service import handle_admin_command, is_admin_phone
 from app.services.analytics_service import format_spending_analysis, get_spending_analysis
+from app.services.company_service import (
+    create_company,
+    get_active_company,
+    get_and_clear_pending_action,
+    is_company_timeout_exceeded,
+    list_user_companies,
+    save_pending_action,
+    switch_mode,
+    touch_company_action,
+)
 from app.services.expense_service import (
     delete_last_expense,
     get_expense_list,
@@ -24,6 +35,11 @@ from app.services.expense_service import (
     update_user_name,
 )
 from app.services.gemini_service import GeminiExtractor
+from app.services.tax_service import (
+    format_tax_summary,
+    get_monthly_tax_summary,
+    record_tax_document,
+)
 from app.services.whatsapp_service import WhatsAppClient
 
 router = APIRouter(prefix="/webhook", tags=["whatsapp"])
@@ -49,65 +65,92 @@ def is_duplicate_message_id(msg_id: str) -> bool:
     return False
 
 
-def get_help_message(user_name: str, user_code: str) -> str:
+def get_help_message(
+    user_name: str,
+    user_code: str,
+    active_mode: str = "PERSONAL",
+    company_name: str | None = None,
+) -> str:
+    if active_mode == "EMPRESA" and company_name:
+        mode_str = f"EMPRESA (*{company_name}*)"
+    else:
+        mode_str = "PERSONAL (Hogar)"
+
     return (
-        f"■ *JAVIBOT* | Control de Gastos\n"
+        f"■ *JAVIBOT* | Control de Gastos & F29\n"
         f"▪ ID Usuario: `{user_code}`\n"
         f"▪ Usuario: *{user_name}*\n"
+        f"▪ Modo Activo: *{mode_str}*\n"
         "──────────────────────────\n\n"
-        "[1] *Configurar o ampliar presupuesto:*\n"
-        "• *Nuevo presupuesto:* `Presupuesto 500000`\n"
-        "• *Abono parcial:* `Agregar presupuesto 150000` o `Sumar al presupuesto 50000`\n\n"
-        "[2] *Registrar gastos diarios:*\n"
-        "• *Texto simple:* `Almuerzo 4500` o `Uber 3200`\n"
-        "• *Con detalle:* `2 cafés por 3000`\n"
-        "• *Audio:* Nota de voz indicando tu compra.\n"
-        "• *Boleta:* Foto de tu ticket o boleta.\n\n"
-        "[3] *Consultar compras y detalle:*\n"
-        "• *Mes actual:* `mis compras`, `ver compras` o `en que gaste`\n"
-        "• *Otro mes:* `compras agosto` o `gastos 2026-08`\n\n"
-        "[4] *Consultar saldo:*\n"
-        "• Enviar: `saldo`, `cuanto me queda` o `resumen`\n\n"
-        "[5] *Diagnóstico y consejos de ahorro:*\n"
-        "• Enviar: `ahorro`, `consejos` o `analisis`\n\n"
-        "[6] *Personalizar tu nombre:*\n"
-        "• Enviar: `Me llamo Carlos` (o tu nombre preferido)\n\n"
-        "[7] *Deshacer último gasto:*\n"
-        "• Enviar: `deshacer` o `eliminar ultimo gasto`\n\n"
-        "[8] *Ver esta ayuda:*\n"
-        "• Enviar: `ayuda` o `menu`"
+        "[1] *MODO Y CONTEXTO:*\n"
+        "• *Cambiar a personal:* `modo personal`\n"
+        "• *Cambiar a empresa:* `modo [nombre de tu empresa]`\n"
+        "• *Ver tus empresas:* `mis empresas`\n"
+        "• *Crear nueva empresa:*\n"
+        "  `crear empresa [Nombre] rut [RUT] remanente [Monto]`\n"
+        "  _Ej: `crear empresa TecnoSpA rut 76.123.456-7 remanente 80000`_\n\n"
+        "[2] *GESTIÓN EMPRESA Y F29 (Chile / SII):*\n"
+        "• *Factura de Venta (Débito Fiscal):*\n"
+        "  `Emití factura por 1.190.000 a Cliente X`\n"
+        "• *Factura de Compra (Recupera 19% IVA):*\n"
+        "  `Factura compra insumos 238.000`\n"
+        "• *Boleta de Compra (Gasto sin crédito IVA):*\n"
+        "  `Boleta materiales 45.000`\n"
+        "• *Presupuesto mensual empresa:* `Presupuesto 3000000`\n"
+        "• *Liquidación y cálculo de impuestos:* `iva`, `impuestos` o `f29`\n\n"
+        "[3] *GASTOS PERSONALES (en Modo Personal):*\n"
+        "• *Registrar gasto:* `Almuerzo 4500` o `Uber 3200`\n"
+        "• *Audio o Foto:* Envía nota de voz o foto de comprobante.\n"
+        "• *Presupuesto mensual:* `Presupuesto 500000`\n"
+        "• *Abono al presupuesto:* `Agregar presupuesto 100000`\n"
+        "• *Consultar saldo:* `saldo`, `cuanto me queda` o `resumen`\n"
+        "• *Diagnóstico y consejos:* `ahorro`, `consejos` o `analisis`\n\n"
+        "[4] *OTROS COMANDOS:*\n"
+        "• *Deshacer último registro:* `deshacer`\n"
+        "• *Consultar compras:* `mis compras` o `compras agosto`\n"
+        "• *Personalizar tu nombre:* `Me llamo Carlos`\n"
+        "• *Ver esta ayuda:* `ayuda` o `menu`"
     )
 
 
 def format_summary(summary: dict) -> str:
     name = summary.get("user_name", "Amigo")
     code = summary.get("user_code", "")
+    mode = summary.get("active_mode", "PERSONAL")
+    comp = summary.get("company_name")
+    header_ctx = f"EMPRESA ({comp})" if (mode == "EMPRESA" and comp) else "PERSONAL"
+
     if not summary.get("has_budget"):
         return (
-            f"[!] *{name}, no tienes un presupuesto configurado para este mes ({summary.get('month')}).*\n\n"
+            f"[!] *{name}, no tienes un presupuesto configurado para {header_ctx} en este mes ({summary.get('month')}).*\n\n"
             "Configúralo enviando:\n"
             "▸ `Presupuesto 500000`\n\n"
             f"▪ ID Usuario: `{code}`"
         )
 
     msg = (
-        f"■ *RESUMEN MENSUAL* | {name}\n"
+        f"■ *RESUMEN MENSUAL* | {header_ctx}\n"
+        f"▪ Titular: {name}\n"
         f"▪ Periodo: {summary['month']}\n"
         f"▪ ID Usuario: `{code}`\n"
         "──────────────────────────\n"
         f"▪ Presupuesto: {format_currency(summary['total_budget'])}\n"
         f"▪ Total Gastado: {format_currency(summary['spent'])}\n"
         f"▪ Saldo Disponible: {format_currency(summary['remaining'])}\n"
-        f"▪ Ahorro en Bóveda: {format_currency(summary['savings'])}\n"
-        f"▪ Compras Registradas: {summary['expense_count']}\n\n"
-        "▸ *Tip:* Escribe 'compras' para ver el detalle de cada compra o 'ahorro' para consejos de optimización."
+        f"▪ Compras Registradas: {summary['expense_count']}\n"
     )
+
+    if mode == "PERSONAL":
+        msg += f"▪ Ahorro en Bóveda: {format_currency(summary.get('savings', 0))}\n"
+        msg += "\n▸ *Tip:* Escribe 'compras' para ver el detalle o 'ahorro' para diagnóstico."
+    else:
+        msg += "\n▸ *Tip:* Escribe 'iva' o 'f29' para ver tu cálculo mensual de impuestos."
 
     cur_day = get_now().day
     if summary["total_budget"] > 0:
         pct_spent = summary["spent"] / summary["total_budget"]
         if pct_spent >= Decimal("0.70") and cur_day <= 20:
-            msg += "\n\n▸ *Alerta:* Has consumido más del 70% de tu presupuesto. Escribe *'ahorro'* para ver tu diagnóstico y sugerencias de ajuste."
+            msg += "\n\n▸ *Alerta:* Has consumido más del 70% de este presupuesto."
 
     return msg
 
@@ -116,12 +159,15 @@ def format_expense_list(data: dict) -> str:
     name = data.get("user_name", "Amigo")
     month = data.get("month", "")
     is_current = data.get("is_current_month", True)
+    mode = data.get("active_mode", "PERSONAL")
+    comp = data.get("company_name")
+    header_ctx = f"EMPRESA ({comp})" if (mode == "EMPRESA" and comp) else "PERSONAL"
 
     month_label = f"este mes actual ({month})" if is_current else f"el mes {month}"
 
     if not data.get("has_budget"):
         return (
-            f"[!] *{name}, no se encontraron registros para {month_label}.*\n\n"
+            f"[!] *{name}, no se encontraron registros de {header_ctx} para {month_label}.*\n\n"
             "▸ *¿Consultar otro mes?*\n"
             "Escribe por ejemplo: `compras agosto` o `gastos 2026-08`."
         )
@@ -129,7 +175,7 @@ def format_expense_list(data: dict) -> str:
     expenses = data.get("expenses", [])
     if not expenses:
         return (
-            f"■ *COMPRAS* | {name} ({month_label})\n"
+            f"■ *COMPRAS* | {header_ctx} ({month_label})\n"
             "──────────────────────────\n"
             "No tienes compras registradas en este período.\n"
             f"▪ Presupuesto: {format_currency(data['total_budget'])}\n"
@@ -138,7 +184,7 @@ def format_expense_list(data: dict) -> str:
         )
 
     lines = [
-        f"■ *DETALLE DE COMPRAS* | {name} ({month_label})",
+        f"■ *DETALLE DE COMPRAS* | {header_ctx} ({month_label})",
         "──────────────────────────",
     ]
     for exp in expenses:
@@ -167,8 +213,6 @@ def format_expense_list(data: dict) -> str:
         )
 
     return "\n".join(lines)
-
-
 
 
 @router.get("")
@@ -341,23 +385,100 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     is_in_trial = True
 
             if not is_in_trial:
-                # Modo Lista Blanca Estricto: Mensaje de presentación de servicio (Cero llamadas a Gemini)
                 pitch_msg = (
                     "■ *JAVIBOT* | Control de Gastos Inteligente\n"
                     "──────────────────────────\n"
-                    f"Hola *{user.name}*, este es un servicio privado de gestión financiera y control de gastos personales vía WhatsApp asistido por IA.\n\n"
+                    f"Hola *{user.name}*, este es un servicio privado de gestión financiera personal y tributaria para empresas vía WhatsApp.\n\n"
                     "▪ *Características principales:*\n"
-                    "• Registro inmediato por texto, nota de voz o foto de boleta\n"
-                    "• Control de presupuesto mensual y saldo disponible\n"
-                    "• Detalle de compras mensuales y consultas históricas\n"
+                    "• Control dual: Gastos personales y Presupuesto Empresa\n"
+                    "• Registro de Facturas (débito/crédito IVA) y Boletas operacionales\n"
+                    "• Liquidación mensual estimada de impuestos F29 y PPM\n"
+                    "• Registro inmediato por texto, nota de voz o foto de boleta/factura\n"
                     "• Privacidad y datos cifrados\n\n"
                     "▸ *¿Deseas contratar el servicio?*\n"
-                    "Responde *SI* para coordinar tu activación y método de pago."
+                    "Responde *SI* para coordinar tu activación."
                 )
                 await whatsapp.send_text(phone, pitch_msg)
                 return {"status": "processed"}
 
-        # Atajos rápidos de texto (sin llamar a Gemini: respuesta instantánea)
+        # 4. Manejo de Confirmación por Timeout de 5 Minutos (si hay acción pendiente retenida)
+        if user.pending_action_data and input_type == "text":
+            raw_text = message.get("text", {}).get("body", "").strip()
+            norm_confirm = raw_text.lower().strip().strip("¿?¡!.,")
+            active_comp = await get_active_company(db, user)
+            comp_norm = active_comp.name_normalized if active_comp else ""
+
+            # Cancelar acción
+            if norm_confirm in {"cancelar", "anular", "cancel", "no"}:
+                await get_and_clear_pending_action(db, user)
+                await whatsapp.send_text(phone, "✓ Registro cancelado.")
+                return {"status": "processed"}
+
+            # Opción 1: Empresa activa
+            if norm_confirm in {"1", "empresa", "si", "sí", "confirmar"} or (comp_norm and norm_confirm == comp_norm):
+                pending = await get_and_clear_pending_action(db, user)
+                if pending and active_comp:
+                    await touch_company_action(db, user)
+                    if pending.get("kind") == "tax_doc":
+                        doc, summary = await record_tax_document(
+                            db=db,
+                            user=user,
+                            company=active_comp,
+                            doc_direction=pending.get("doc_direction", "RECEIVED"),
+                            doc_type=pending.get("doc_type", "FACTURA"),
+                            total_amount=pending.get("total_amount", 0),
+                            net_amount=pending.get("net_amount"),
+                            counterpart=pending.get("counterpart", ""),
+                            description=pending.get("description", ""),
+                            raw_input_type=pending.get("raw_input_type", "text"),
+                        )
+                        f29_str = f"🏛️ Saldo F29 proyectado: {format_currency(summary['iva_a_pagar'])} a pagar." if summary['iva_a_pagar'] > 0 else f"💰 Remanente F29 a favor: {format_currency(summary['remanente_nuevo'])}."
+                        reply = (
+                            f"✓ *{doc.doc_type.capitalize()} registrada en {active_comp.name}*\n"
+                            f"▪ Monto Total: {format_currency(doc.total_amount)}\n"
+                            f"▪ {f29_str}"
+                        )
+                    else:
+                        ext_dict = pending.get("extraction", {})
+                        ext_obj = ExtractionResult.model_validate(ext_dict)
+                        _, val, _ = await record_extraction(db, phone, pending.get("raw_input_type", "text"), ext_obj, profile_name)
+                        reply = f"✓ Gasto registrado en *{active_comp.name}*: {format_currency(ext_obj.total_spent)}\n▪ Presupuesto empresa disponible: {format_currency(val)}"
+
+                    await whatsapp.send_text(phone, reply)
+                    return {"status": "processed"}
+
+            # Opción 2: Cuenta Personal
+            if norm_confirm in {"2", "personal", "mi cuenta", "hogar", "casa"}:
+                pending = await get_and_clear_pending_action(db, user)
+                if pending:
+                    # Forzar registro en presupuesto personal
+                    original_mode = user.active_mode
+                    user.active_mode = "PERSONAL"
+                    await db.commit()
+
+                    if pending.get("kind") == "tax_doc":
+                        tot = pending.get("total_amount", 0)
+                        ext_personal = ExtractionResult(total_spent=tot)
+                    else:
+                        ext_personal = ExtractionResult.model_validate(pending.get("extraction", {}))
+
+                    _, val, _ = await record_extraction(db, phone, pending.get("raw_input_type", "text"), ext_personal, profile_name)
+                    # Restaurar modo original
+                    user.active_mode = original_mode
+                    await db.commit()
+
+                    reply = (
+                        f"✓ *Gasto registrado en tu cuenta Personal*: {format_currency(ext_personal.total_spent)}\n"
+                        f"▪ Saldo disponible personal: {format_currency(val)}\n"
+                        f"▸ *Nota:* Al registrarse en Personal, no recupera crédito fiscal IVA."
+                    )
+                    await whatsapp.send_text(phone, reply)
+                    return {"status": "processed"}
+
+        # 5. Atajos directos de texto (sin llamar a Gemini: respuesta instantánea en < 2 ms)
+        active_comp = await get_active_company(db, user)
+        comp_name = active_comp.name if active_comp else None
+
         if input_type == "text":
             content = message.get("text", {}).get("body", "").strip()
             mime_type = None
@@ -378,9 +499,50 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                         return {"status": "processed"}
 
             # Comandos de ayuda
-            if norm in {"ayuda", "help", "menu", "menú", "inicio", "start", "hola", "buenas", "como funciona", "cómo funciona", "que puedes hacer", "qué puedes hacer"}:
+            if norm in {"ayuda", "help", "menu", "menú", "inicio", "start", "hola", "buenas", "como funciona", "cómo funciona"}:
                 print(f"--> [WEBHOOK] Enviando mensaje de ayuda a {user.name}")
-                await whatsapp.send_text(phone, get_help_message(user.name, user.user_code))
+                await whatsapp.send_text(phone, get_help_message(user.name, user.user_code, user.active_mode, comp_name))
+                return {"status": "processed"}
+
+            # Listado de empresas
+            if norm in {"mis empresas", "ver empresas", "empresas", "lista empresas", "mis companias", "mis compañías"}:
+                companies = await list_user_companies(db, user.id)
+                if not companies:
+                    msg = (
+                        "■ *TUS EMPRESAS*\n"
+                        "──────────────────────────\n"
+                        "No tienes ninguna empresa registrada aún.\n\n"
+                        "▸ Para registrar tu primera empresa, escribe:\n"
+                        "`crear empresa [Nombre] rut [RUT] remanente [Monto]`\n\n"
+                        "Ej: `crear empresa TecnoSpA rut 76.123.456-7 remanente 80000`"
+                    )
+                else:
+                    lines = ["■ *TUS EMPRESAS REGISTRADAS*", "──────────────────────────"]
+                    for c in companies:
+                        active_mark = " ✓ *(Activa)*" if (user.active_mode == "EMPRESA" and user.active_company_id == c.id) else ""
+                        lines.append(f"• *{c.name}*{active_mark}")
+                        lines.append(f"  RUT: `{c.rut}` | Remanente IVA: {format_currency(c.initial_tax_credit)}")
+                        lines.append(f"  ▸ Para activar escribe: `modo {c.name.lower()}`")
+                    lines.append("──────────────────────────")
+                    lines.append("• Para volver a gastos del hogar: `modo personal`")
+                    msg = "\n".join(lines)
+
+                await whatsapp.send_text(phone, msg)
+                return {"status": "processed"}
+
+            # Liquidación F29 / Impuestos
+            if norm in {"iva", "impuestos", "impuesto", "f29", "formulario 29", "mi iva", "balance tributario", "cuanto iva debo", "cuánto iva debo", "cuanto debo de iva", "cuánto debo de iva"}:
+                if user.active_mode != "EMPRESA" or not active_comp:
+                    await whatsapp.send_text(
+                        phone,
+                        "[!] Para consultar tu liquidación de impuestos F29 debes estar en Modo Empresa.\n\n"
+                        "▸ Escribe `modo [nombre de tu empresa]` (ej: `modo tecnospa`).\n"
+                        "O escribe `mis empresas` para ver tus empresas registradas."
+                    )
+                else:
+                    await touch_company_action(db, user)
+                    tax_summary = await get_monthly_tax_summary(db, active_comp)
+                    await whatsapp.send_text(phone, format_tax_summary(tax_summary))
                 return {"status": "processed"}
 
             # Comandos de lista de compras / gastos
@@ -391,14 +553,12 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 "ver compras", "ver gastos", "detalle de gastos", "lista de compras", "compras", "gastos"
             )
             if any(norm == trig or norm.startswith(trig + " ") for trig in expense_list_triggers):
-                print(f"--> [WEBHOOK] Consultando lista de compras directa para {user.name}")
                 data = await get_expense_list(db, phone, raw_month=content, profile_name=profile_name)
                 await whatsapp.send_text(phone, format_expense_list(data))
                 return {"status": "processed"}
 
             # Comandos de saldo / resumen
             if norm in {"saldo", "cuanto me queda", "cuánto me queda", "cuanto tengo", "cuánto tengo", "resumen", "balance", "estado", "cuanto he gastado", "cuánto he gastado"}:
-                print(f"--> [WEBHOOK] Consultando resumen directo para {user.name}")
                 summary = await get_monthly_summary(db, phone, profile_name)
                 await whatsapp.send_text(phone, format_summary(summary))
                 return {"status": "processed"}
@@ -410,19 +570,17 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 "en qué gasto más", "donde gasto mas", "dónde gasto más", "diagnostico", "diagnóstico"
             )
             if any(norm == trig or norm.startswith(trig + " ") for trig in analytics_triggers):
-                print(f"--> [WEBHOOK] Solicitando diagnóstico de gastos y ahorro para {user.name}")
                 analysis = await get_spending_analysis(db, phone, profile_name=profile_name)
                 await whatsapp.send_text(phone, format_spending_analysis(analysis))
                 return {"status": "processed"}
 
-            # Comandos para deshacer o borrar el último gasto
+            # Deshacer o borrar el último gasto
             undo_triggers = (
                 "deshacer", "eliminar gasto", "borrar gasto", "eliminar ultimo gasto",
                 "eliminar último gasto", "borrar ultimo gasto", "borrar último gasto",
                 "cancelar gasto", "anular gasto"
             )
             if norm in undo_triggers:
-                print(f"--> [WEBHOOK] Deshaciendo último gasto para {user.name}")
                 success, msg = await delete_last_expense(db, phone)
                 await whatsapp.send_text(phone, msg)
                 return {"status": "processed"}
@@ -435,63 +593,216 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             print(f"--> [WEBHOOK] Tipo no soportado: {input_type}")
             return {"status": "ignored"}
 
+        # 6. Extracción (Base de conocimiento local de 0 tokens prioritaria + fallback Gemini/Groq)
         extraction = await extractor.extract(input_type, content, mime_type)
-        print(f"--> [WEBHOOK] Extracción Gemini: {extraction}")
+        print(f"--> [WEBHOOK] Extracción: {extraction}")
 
-        # Una imagen es SIEMPRE un comprobante de gasto, nunca una consulta de lista ni saldo
+        # Si el usuario solicitó crear una empresa
+        if extraction.is_company_creation and extraction.company_name and extraction.company_rut:
+            comp_obj, is_new = await create_company(
+                db=db,
+                user=user,
+                name=extraction.company_name,
+                rut=extraction.company_rut,
+                initial_tax_credit=extraction.initial_credit or 0.0,
+            )
+            action_label = "creada y activada" if is_new else "actualizada y activada"
+            reply = (
+                f"✓ *Empresa {action_label} con éxito*\n"
+                f"▪ Nombre: *{comp_obj.name}*\n"
+                f"▪ RUT: `{comp_obj.rut}`\n"
+                f"▪ Remanente Inicial IVA: {format_currency(comp_obj.initial_tax_credit)}\n"
+                f"▪ *Modo Activo:* Has entrado en *Modo Empresa ({comp_obj.name})*.\n\n"
+                "▸ Para volver a tus gastos personales en cualquier momento, escribe `modo personal`."
+            )
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        # Si el usuario solicitó cambiar de modo
+        if extraction.target_mode:
+            switch_msg, _ = await switch_mode(db, user, extraction.target_mode, extraction.target_company_name)
+            await whatsapp.send_text(phone, switch_msg)
+            return {"status": "processed"}
+
+        # Si consultó empresas
+        if extraction.is_companies_list_inquiry:
+            companies = await list_user_companies(db, user.id)
+            if not companies:
+                reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
+            else:
+                lines = ["■ *TUS EMPRESAS*", "──────────────────────────"]
+                for c in companies:
+                    lines.append(f"• *{c.name}* (RUT: `{c.rut}`) -> `modo {c.name.lower()}`")
+                reply = "\n".join(lines)
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        # Si consultó impuestos
+        if extraction.is_tax_inquiry:
+            if user.active_mode != "EMPRESA" or not active_comp:
+                reply = "[!] Para consultar impuestos F29 debes activar tu empresa. Escribe `modo [nombre de tu empresa]`."
+            else:
+                await touch_company_action(db, user)
+                tax_summary = await get_monthly_tax_summary(db, active_comp)
+                reply = format_tax_summary(tax_summary)
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        # Una imagen es SIEMPRE un comprobante de gasto/factura, nunca una consulta
         if input_type == "image":
             extraction.is_expense_list_inquiry = False
             extraction.is_balance_inquiry = False
             extraction.is_budget_setup = False
 
-        # Si se extrajo un monto o ítems, tiene prioridad absoluta como registro de gasto
         if extraction.total_spent > 0 or extraction.items:
             extraction.is_expense_list_inquiry = False
             extraction.is_balance_inquiry = False
 
         if extraction.is_balance_inquiry:
-            result_type = "balance"
             summary = await get_monthly_summary(db, phone, profile_name)
             reply = format_summary(summary)
-        elif extraction.is_expense_list_inquiry:
-            result_type = "expense_list"
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        if extraction.is_expense_list_inquiry:
             month_param = extraction.target_month or (content if isinstance(content, str) else None)
             data = await get_expense_list(db, phone, raw_month=month_param, profile_name=profile_name)
             reply = format_expense_list(data)
-        else:
-            result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
-            if result_type == "budget":
-                reply = f"✓ Presupuesto mensual configurado, {user.name}: {format_currency(value)}"
-            elif result_type == "budget_added":
-                summary = await get_monthly_summary(db, phone, profile_name)
-                reply = (
-                    f"✓ *Presupuesto ampliado con éxito*, {user.name}!\n"
-                    f"▪ Monto agregado: +{format_currency(value)}\n"
-                    f"▪ Nuevo presupuesto mensual: *{format_currency(summary['total_budget'])}*\n"
-                    f"▪ Saldo disponible actualizado: *{format_currency(summary['remaining'])}*"
-                )
-            elif result_type == "unrecognized":
-                reply = (
-                    f"[!] Hola {user.name}, no detecté un gasto ni consulta.\n\n"
-                    "▪ *Opciones disponibles:*\n"
-                    "• Registrar gasto: `Almuerzo 4500` o `Uber 3200`\n"
-                    "• Consultar saldo: `saldo` o `cuanto me queda`\n"
-                    "• Consejos y ahorro: `ahorro` o `consejos`\n"
-                    "• Ver compras: `mis compras` o `compras agosto`\n"
-                    "• Configurar presupuesto: `Presupuesto 500000`\n"
-                    "• Ampliar presupuesto: `Agregar presupuesto 100000`\n"
-                    "• Cambiar nombre: `Me llamo [Nombre]`\n"
-                    "• Ver ayuda: `ayuda`"
-                )
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        # 7. Procesamiento de Facturas / Boletas y Gastos con Timeout de 5 Minutos
+        is_in_company_mode = (user.active_mode == "EMPRESA" and active_comp is not None)
+
+        # Regla de Timeout de 5 minutos: si está en modo empresa y pasaron >300s de inactividad
+        if is_in_company_mode and is_company_timeout_exceeded(user, timeout_seconds=300):
+            item_desc = extraction.items[0].name if extraction.items else "Registro"
+            amt_display = format_currency(extraction.total_spent)
+
+            if extraction.tax_doc_type:
+                pending_payload = {
+                    "kind": "tax_doc",
+                    "doc_direction": extraction.tax_doc_direction or "RECEIVED",
+                    "doc_type": extraction.tax_doc_type,
+                    "total_amount": extraction.total_spent,
+                    "net_amount": extraction.net_amount,
+                    "is_net_amount": extraction.is_net_amount,
+                    "counterpart": extraction.counterpart or "",
+                    "description": item_desc,
+                    "raw_input_type": input_type,
+                }
             else:
-                reply = (
-                    f"✓ Gasto registrado, {user.name}: {format_currency(extraction.total_spent)}\n"
-                    f"▪ Saldo disponible: {format_currency(value)}"
+                pending_payload = {
+                    "kind": "expense",
+                    "extraction": extraction.model_dump(),
+                    "raw_input_type": input_type,
+                }
+
+            await save_pending_action(db, user, pending_payload)
+
+            timeout_confirm_msg = (
+                f"⚠️ *Han pasado más de 5 minutos desde tu última acción en {active_comp.name}.*\n\n"
+                f"¿Dónde deseas registrar este movimiento de *{amt_display}* ({item_desc})?\n\n"
+                f"• Responde *1* para *{active_comp.name}* (Modo Empresa)\n"
+                f"• Responde *2* para *Personal* (Cuenta Personal)\n"
+                f"• O escribe *cancelar*"
+            )
+            await whatsapp.send_text(phone, timeout_confirm_msg)
+            return {"status": "processed"}
+
+        # Si es un documento tributario explícito (Factura o Boleta)
+        if extraction.tax_doc_type in {"FACTURA", "BOLETA"}:
+            if is_in_company_mode:
+                await touch_company_action(db, user)
+                doc, tax_sum = await record_tax_document(
+                    db=db,
+                    user=user,
+                    company=active_comp,
+                    doc_direction=extraction.tax_doc_direction or "RECEIVED",
+                    doc_type=extraction.tax_doc_type,
+                    total_amount=extraction.total_spent,
+                    net_amount=extraction.net_amount,
+                    counterpart=extraction.counterpart or "",
+                    description=extraction.items[0].name if extraction.items else "",
+                    raw_input_type=input_type,
                 )
-                if is_in_trial:
-                    user.trial_expense_count += 1
-                    await db.commit()
-                    reply += f"\n\n▸ *Uso de prueba:* {user.trial_expense_count}/{settings.free_trial_max_expenses} registros."
+
+                if doc.doc_direction == "EMITTED":
+                    reply = (
+                        f"✓ *Factura de Venta emitida ({active_comp.name})*\n"
+                        f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
+                        f"▪ Monto Neto: {format_currency(doc.net_amount)}\n"
+                        f"▪ *Débito Fiscal (+IVA):* `+{format_currency(doc.iva_amount)}`\n"
+                    )
+                elif doc.doc_type == "FACTURA":
+                    reply = (
+                        f"✓ *Factura de Compra registrada ({active_comp.name})*\n"
+                        f"▪ Total Proveedor: {format_currency(doc.total_amount)}\n"
+                        f"▪ Gasto Neto empresa: {format_currency(doc.net_amount)}\n"
+                        f"▪ *Crédito Fiscal IVA recuperado:* `+{format_currency(doc.iva_amount)}`\n"
+                    )
+                else:  # BOLETA
+                    reply = (
+                        f"✓ *Boleta de compra registrada ({active_comp.name})*\n"
+                        f"▪ Gasto total: *{format_currency(doc.total_amount)}* (Gasto operacional)\n"
+                        f"▪ *Crédito Fiscal IVA:* $0 (Sin crédito fiscal)\n"
+                    )
+
+                f29_part = f"🏛️ Saldo F29 actual: {format_currency(tax_sum['iva_a_pagar'])} a pagar." if tax_sum['iva_a_pagar'] > 0 else f"💰 Remanente F29 a favor: {format_currency(tax_sum['remanente_nuevo'])}."
+                reply += f"▪ {f29_part}"
+
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+            else:
+                # Está en modo PERSONAL: registrar como gasto personal común
+                result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
+                reply = (
+                    f"✓ Gasto registrado en *Modo Personal*, {user.name}: {format_currency(extraction.total_spent)}\n"
+                    f"▪ Saldo disponible: {format_currency(value)}\n\n"
+                    "▸ *Aviso:* Al estar en Modo Personal, este documento no genera crédito fiscal IVA. "
+                    "Si pertenecía a tu empresa, escribe `modo [nombre de tu empresa]` y vuelve a registrarlo."
+                )
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+
+        # 8. Registro de Gasto o Presupuesto General
+        result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
+        ctx_label = f" ({active_comp.name})" if is_in_company_mode else ""
+
+        if is_in_company_mode:
+            await touch_company_action(db, user)
+
+        if result_type == "budget":
+            reply = f"✓ Presupuesto mensual configurado{ctx_label}, {user.name}: {format_currency(value)}"
+        elif result_type == "budget_added":
+            summary = await get_monthly_summary(db, phone, profile_name)
+            reply = (
+                f"✓ *Presupuesto ampliado con éxito*{ctx_label}, {user.name}!\n"
+                f"▪ Monto agregado: +{format_currency(value)}\n"
+                f"▪ Nuevo presupuesto: *{format_currency(summary['total_budget'])}*\n"
+                f"▪ Saldo disponible: *{format_currency(summary['remaining'])}*"
+            )
+        elif result_type == "unrecognized":
+            reply = (
+                f"[!] Hola {user.name}, no detecté un gasto ni consulta.\n\n"
+                "▪ *Opciones disponibles:*\n"
+                "• Registrar gasto: `Almuerzo 4500` o nota de voz\n"
+                "• Factura venta: `Emití factura por 1.190.000`\n"
+                "• Factura compra: `Factura insumos 238.000`\n"
+                "• Boleta: `Boleta 45.000`\n"
+                "• Liquidación impuestos: `iva` o `f29`\n"
+                "• Cambiar modo: `modo [empresa]` o `modo personal`\n"
+                "• Ver ayuda: `ayuda`"
+            )
+        else:
+            reply = (
+                f"✓ Gasto registrado{ctx_label}, {user.name}: {format_currency(extraction.total_spent)}\n"
+                f"▪ Saldo disponible: {format_currency(value)}"
+            )
+            if is_in_trial:
+                user.trial_expense_count += 1
+                await db.commit()
+                reply += f"\n\n▸ *Uso de prueba:* {user.trial_expense_count}/{settings.free_trial_max_expenses} registros."
 
         # Si es un usuario recién creado, darle una bienvenida introductoria
         if is_new_user and result_type != "budget":
@@ -522,7 +833,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     await whatsapp.send_text(
                         phone,
                         "[!] El servicio de IA está con límite de cuota diario superado.\n"
-                        "▪ Puedes registrar gastos en texto simple sin límites (ej: `Almuerzo 4500` o `Insumos 12000`)."
+                        "▪ Puedes registrar gastos y facturas en texto simple sin límites."
                     )
                 except Exception:
                     pass

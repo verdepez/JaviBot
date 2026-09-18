@@ -23,6 +23,10 @@ async def extract_with_groq(
         '  "is_budget_addition": false,\n'
         '  "is_balance_inquiry": false,\n'
         '  "is_expense_list_inquiry": false,\n'
+        '  "is_tax_inquiry": false,\n'
+        '  "tax_doc_direction": null,\n'
+        '  "tax_doc_type": null,\n'
+        '  "counterpart": null,\n'
         '  "target_month": null,\n'
         '  "budget_amount": null,\n'
         '  "items": [{"name": "string", "quantity": 1, "unit_price": 0, "total": 0, "category": "string"}],\n'
@@ -30,7 +34,8 @@ async def extract_with_groq(
         "}\n"
         "Categorías válidas: mascotas, educacion, familia, alimentos, hogar_servicios, transporte, salud, ocio, trabajo_insumos, otros.\n"
         "En Chile no se usan centavos en transacciones diarias, los números enteros representan pesos (ej: 45000 son $45.000). "
-        "Si el usuario pide saldo o presupuesto, marca el booleano correspondiente (si agrega al presupuesto actual, marca is_budget_addition=true). Si es un gasto, calcula total_spent y los ítems."
+        "Si es Factura emitida (venta): tax_doc_type='FACTURA', tax_doc_direction='EMITTED'. Si es Factura de compra: tax_doc_type='FACTURA', tax_doc_direction='RECEIVED'. Si es Boleta: tax_doc_type='BOLETA', tax_doc_direction='RECEIVED'. "
+        "Si el usuario pide saldo o presupuesto, marca el booleano correspondiente. Si consulta impuestos o IVA o F29, marca is_tax_inquiry=true. Si es un gasto o factura, calcula total_spent y los ítems."
     )
 
     try:

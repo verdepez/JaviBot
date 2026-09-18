@@ -27,10 +27,19 @@ async def init_db() -> None:
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_expense_count INTEGER DEFAULT 0;
                         ALTER TABLE users ADD COLUMN IF NOT EXISTS notes VARCHAR(255);
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS active_mode VARCHAR(20) DEFAULT 'PERSONAL';
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS active_company_id INTEGER;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS last_company_action_at TIMESTAMP WITH TIME ZONE;
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS pending_action_data VARCHAR(1000);
                         -- Permitir nulo en phone_number anterior
                         IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'phone_number') THEN
                             ALTER TABLE users ALTER COLUMN phone_number DROP NOT NULL;
                         END IF;
+                    END IF;
+
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'budgets') THEN
+                        ALTER TABLE budgets ADD COLUMN IF NOT EXISTS budget_type VARCHAR(20) DEFAULT 'PERSONAL';
+                        ALTER TABLE budgets ADD COLUMN IF NOT EXISTS company_id INTEGER;
                     END IF;
                 END $$;
                 """
@@ -63,6 +72,11 @@ async def init_db() -> None:
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_expense_items_category ON expense_items (category);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_savings_vault_user_amount ON savings_vault (user_id, amount_saved);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_budgets_month_year ON budgets (month_year);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_budgets_company_id ON budgets (company_id);"))
+        await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_companies_user_norm_name ON companies (user_id, name_normalized);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_user_id ON companies (user_id);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tax_docs_company_month ON tax_documents (company_id, month_year, doc_direction);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tax_docs_user_id ON tax_documents (user_id);"))
 
         # Eliminar índices redundantes si existen (ya cubiertos por los índices compuestos)
         await connection.execute(text("DROP INDEX IF EXISTS ix_expenses_budget_id;"))

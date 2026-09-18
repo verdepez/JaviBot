@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.formatters import format_currency
 from app.core.security import clean_first_name, encrypt_phone, generate_user_code, hash_phone, normalize_phone
 from app.core.timezone import get_current_month
-from app.models import Budget, Expense, ExpenseItem, SavingsVault, User
+from app.models import Budget, Company, Expense, ExpenseItem, SavingsVault, User
 from app.schemas import ExtractionResult
 
 
@@ -153,6 +153,25 @@ async def update_user_name(db: AsyncSession, phone_number: str, new_name: str) -
     return user, user.name
 
 
+async def get_active_budget_for_user(db: AsyncSession, user: User, month_year: str) -> Budget | None:
+    if user.active_mode == "EMPRESA" and user.active_company_id:
+        return await db.scalar(
+            select(Budget).where(
+                Budget.user_id == user.id,
+                Budget.company_id == user.active_company_id,
+                Budget.month_year == month_year,
+                Budget.budget_type == "EMPRESA",
+            )
+        )
+    return await db.scalar(
+        select(Budget).where(
+            Budget.user_id == user.id,
+            Budget.month_year == month_year,
+            Budget.budget_type == "PERSONAL",
+        )
+    )
+
+
 async def record_extraction(
     db: AsyncSession,
     phone_number: str,
@@ -163,14 +182,18 @@ async def record_extraction(
     user, _ = await get_or_create_user(db, phone_number, profile_name)
 
     month = active_month()
-    budget = await db.scalar(select(Budget).where(Budget.user_id == user.id, Budget.month_year == month))
+    budget = await get_active_budget_for_user(db, user, month)
+    is_company = (user.active_mode == "EMPRESA" and user.active_company_id is not None)
+    b_type = "EMPRESA" if is_company else "PERSONAL"
+    c_id = user.active_company_id if is_company else None
+
     if extraction.is_budget_setup:
         if extraction.budget_amount is None or extraction.budget_amount <= 0:
             raise ValueError(f"Por favor indica un monto válido para tu presupuesto mensual, {user.name} (ej: 'Presupuesto 500000').")
         amount = Decimal(str(extraction.budget_amount))
         if extraction.is_budget_addition:
             if budget is None:
-                budget = Budget(user_id=user.id, month_year=month, total_budget=amount)
+                budget = Budget(user_id=user.id, month_year=month, budget_type=b_type, company_id=c_id, total_budget=amount)
                 db.add(budget)
             else:
                 budget.total_budget += amount
@@ -178,7 +201,7 @@ async def record_extraction(
             return "budget_added", amount, user
         else:
             if budget is None:
-                budget = Budget(user_id=user.id, month_year=month, total_budget=amount)
+                budget = Budget(user_id=user.id, month_year=month, budget_type=b_type, company_id=c_id, total_budget=amount)
                 db.add(budget)
             else:
                 budget.total_budget = amount
@@ -196,7 +219,8 @@ async def record_extraction(
         return "unrecognized", Decimal("0"), user
 
     if budget is None:
-        raise ValueError(f"Primero configura tu presupuesto mensual, {user.name} (ej: 'Mi presupuesto este mes es 500000').")
+        context_str = f"tu empresa" if is_company else "este mes"
+        raise ValueError(f"Primero configura tu presupuesto mensual para {context_str}, {user.name} (ej: 'Presupuesto 500000').")
 
     total = Decimal(str(extraction.total_spent))
     expense = Expense(budget_id=budget.id, raw_input_type=input_type, total_amount=total)
@@ -236,13 +260,19 @@ async def record_extraction(
 async def get_monthly_summary(db: AsyncSession, phone_number: str, profile_name: str | None = None) -> dict:
     user, _ = await get_or_create_user(db, phone_number, profile_name)
     month = active_month()
-    budget = await db.scalar(select(Budget).where(Budget.user_id == user.id, Budget.month_year == month))
+    budget = await get_active_budget_for_user(db, user, month)
+    is_company = (user.active_mode == "EMPRESA" and user.active_company_id is not None)
+    company = await db.get(Company, user.active_company_id) if is_company else None
+    comp_name = company.name if company else None
+
     if budget is None:
         return {
             "has_budget": False,
             "month": month,
             "user_name": user.name,
             "user_code": user.user_code,
+            "active_mode": user.active_mode,
+            "company_name": comp_name,
         }
 
     summary_res = await db.execute(
@@ -264,6 +294,8 @@ async def get_monthly_summary(db: AsyncSession, phone_number: str, profile_name:
         "month": month,
         "user_name": user.name,
         "user_code": user.user_code,
+        "active_mode": user.active_mode,
+        "company_name": comp_name,
         "total_budget": budget.total_budget,
         "spent": spent,
         "remaining": remaining,
@@ -283,7 +315,11 @@ async def get_expense_list(
     current = active_month()
     is_current = (target == current)
 
-    budget = await db.scalar(select(Budget).where(Budget.user_id == user.id, Budget.month_year == target))
+    budget = await get_active_budget_for_user(db, user, target)
+    is_company = (user.active_mode == "EMPRESA" and user.active_company_id is not None)
+    company = await db.get(Company, user.active_company_id) if is_company else None
+    comp_name = company.name if company else None
+
     if budget is None:
         return {
             "has_budget": False,
@@ -291,6 +327,8 @@ async def get_expense_list(
             "is_current_month": is_current,
             "user_name": user.name,
             "user_code": user.user_code,
+            "active_mode": user.active_mode,
+            "company_name": comp_name,
             "expenses": [],
             "total_spent": Decimal("0"),
             "total_budget": Decimal("0"),
@@ -318,6 +356,8 @@ async def get_expense_list(
         "is_current_month": is_current,
         "user_name": user.name,
         "user_code": user.user_code,
+        "active_mode": user.active_mode,
+        "company_name": comp_name,
         "total_budget": budget.total_budget,
         "total_spent": total_spent,
         "remaining": remaining,
@@ -331,7 +371,7 @@ async def delete_last_expense(db: AsyncSession, phone_number: str) -> tuple[bool
         return False, "[!] No se encontró tu cuenta de usuario."
 
     current = active_month()
-    budget = await db.scalar(select(Budget).where(Budget.user_id == user.id, Budget.month_year == current))
+    budget = await get_active_budget_for_user(db, user, current)
     if not budget:
         return False, f"[!] No tienes un presupuesto activo para este mes ({current})."
 

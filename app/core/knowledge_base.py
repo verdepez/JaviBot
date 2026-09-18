@@ -191,7 +191,7 @@ def try_parse_single_item(text: str) -> dict | None:
     m_d1 = re.search(r"^([a-záéíóúñA-ZÁÉÍÓÚÑ\s\/\-_]{2,50})\s+\$?([0-9][0-9.,]*)(?:\s*(?:pesos|clp|\$))?$", raw)
     if m_d1:
         desc = clean_concept(m_d1.group(1))
-        if desc.lower() not in {"presupuesto", "saldo", "compras", "gastos", "ayuda", "admin", "autorizar", "bloquear"}:
+        if desc.lower() not in {"presupuesto", "saldo", "compras", "gastos", "ayuda", "admin", "autorizar", "bloquear", "factura", "boleta", "empresa", "modo", "iva", "f29"}:
             amt = parse_amount(m_d1.group(2))
             if amt and desc:
                 return {"name": desc.capitalize(), "amount": amt, "category": categorize_item(desc)}
@@ -201,7 +201,7 @@ def try_parse_single_item(text: str) -> dict | None:
     if m_d2:
         amt = parse_amount(m_d2.group(1))
         desc = clean_concept(m_d2.group(2))
-        if amt and desc.lower() not in {"pesos", "clp", "dolares", "dólares"}:
+        if amt and desc.lower() not in {"pesos", "clp", "dolares", "dólares", "factura", "boleta", "empresa", "modo", "iva", "f29"}:
             return {"name": desc.capitalize(), "amount": amt, "category": categorize_item(desc)}
 
     return None
@@ -210,6 +210,107 @@ def try_parse_single_item(text: str) -> dict | None:
 def try_parse_text_locally(text: str) -> ExtractionResult | None:
     raw = text.strip()
     norm = raw.lower().strip(".,¡!¿?")
+
+    # 0. Creación y gestión de empresas
+    m_company = re.search(
+        r"^(?:crear|agregar|nueva|registrar)\s+empresa\s+(.+?)\s+rut\s+([0-9kK\.\-]+)(?:\s+(?:con\s+)?remanente\s+(?:de\s+)?\$?([0-9][0-9\.,\s]*))?$",
+        raw,
+        re.IGNORECASE,
+    )
+    if m_company:
+        c_name = m_company.group(1).strip()
+        c_rut = m_company.group(2).strip()
+        c_rem = parse_amount(m_company.group(3)) if m_company.group(3) else 0.0
+        return ExtractionResult(
+            is_company_creation=True,
+            company_name=c_name,
+            company_rut=c_rut,
+            initial_credit=c_rem or 0.0,
+        )
+
+    # 0b. Conmutación de modo (Personal vs Empresa)
+    m_mode = re.search(r"^modo\s+(.+)$", norm)
+    if m_mode:
+        target = m_mode.group(1).strip()
+        if target in {"personal", "hogar", "casa", "familia", "normal"}:
+            return ExtractionResult(target_mode="personal")
+        else:
+            return ExtractionResult(target_mode=target, target_company_name=target)
+
+    # 0c. Consulta de empresas
+    if norm in {"mis empresas", "ver empresas", "empresas", "lista empresas", "mis companias", "mis compañías"}:
+        return ExtractionResult(is_companies_list_inquiry=True)
+
+    # 0d. Consulta tributaria F29 / IVA
+    if norm in {"iva", "impuestos", "impuesto", "f29", "formulario 29", "mi iva", "balance tributario", "cuanto iva debo", "cuánto iva debo", "cuanto debo de iva", "cuánto debo de iva"}:
+        return ExtractionResult(is_tax_inquiry=True)
+
+    # 0e. Facturas Emitidas (Ventas con IVA Débito Fiscal)
+    m_f_emit = re.search(
+        r"^(?:emit[ií]|hice|venta(?:\s+en)?)\s+(?:una\s+)?factura(?:\s+(?:por|de))?\s+\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva))?(?:\s+(?:a|para)\s+(.+))?$",
+        raw,
+        re.IGNORECASE,
+    )
+    if not m_f_emit:
+        m_f_emit = re.search(
+            r"^factura\s+emitida(?:\s+(?:por|de))?\s+\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva))?(?:\s+(?:a|para)\s+(.+))?$",
+            raw,
+            re.IGNORECASE,
+        )
+    if m_f_emit:
+        amt = parse_amount(m_f_emit.group(1))
+        is_net = bool(m_f_emit.group(2) and "neto" in m_f_emit.group(2).lower())
+        counterpart = m_f_emit.group(3).strip() if m_f_emit.group(3) else ""
+        if amt:
+            return ExtractionResult(
+                tax_doc_direction="EMITTED",
+                tax_doc_type="FACTURA",
+                total_spent=amt,
+                is_net_amount=is_net,
+                net_amount=amt if is_net else None,
+                counterpart=counterpart,
+                items=[ExtractedItem(name=f"Factura emitida {counterpart}".strip(), quantity=1, unit_price=amt, total=amt, category="trabajo_insumos")],
+            )
+
+    # 0f. Facturas Recibidas (Compras con IVA Crédito Fiscal)
+    m_f_rec = re.search(
+        r"^(?:recib[ií]\s+factura|factura\s+compra|compra\s+con\s+factura|factura)(?:\s+de|\s+por)?\s+(?:(.+?)\s+)?\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva))?$",
+        raw,
+        re.IGNORECASE,
+    )
+    if m_f_rec:
+        desc = clean_concept(m_f_rec.group(1) or "")
+        amt = parse_amount(m_f_rec.group(2))
+        is_net = bool(m_f_rec.group(3) and "neto" in m_f_rec.group(3).lower())
+        if amt:
+            concept = desc.capitalize() if desc else "Insumos y servicios"
+            return ExtractionResult(
+                tax_doc_direction="RECEIVED",
+                tax_doc_type="FACTURA",
+                total_spent=amt,
+                is_net_amount=is_net,
+                net_amount=amt if is_net else None,
+                counterpart="",
+                items=[ExtractedItem(name=concept, quantity=1, unit_price=amt, total=amt, category=categorize_item(concept))],
+            )
+
+    # 0g. Boletas Recibidas (Gasto Operacional sin Crédito Fiscal)
+    m_bol = re.search(
+        r"^(?:boleta|boleta\s+gasto)(?:\s+de|\s+por)?\s+(?:(.+?)\s+)?\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?$",
+        raw,
+        re.IGNORECASE,
+    )
+    if m_bol:
+        desc = clean_concept(m_bol.group(1) or "")
+        amt = parse_amount(m_bol.group(2))
+        if amt:
+            concept = desc.capitalize() if desc else "Gasto en boleta"
+            return ExtractionResult(
+                tax_doc_direction="RECEIVED",
+                tax_doc_type="BOLETA",
+                total_spent=amt,
+                items=[ExtractedItem(name=concept, quantity=1, unit_price=amt, total=amt, category=categorize_item(concept))],
+            )
 
     # 1. Configuración o Ampliación de Presupuesto
     # 1a. Ampliación / Abono parcial al presupuesto existente
