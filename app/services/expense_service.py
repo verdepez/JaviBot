@@ -148,7 +148,8 @@ async def update_user_name(db: AsyncSession, phone_number: str, new_name: str) -
     clean_name = clean_first_name(new_name)
     user, _ = await get_or_create_user(db, phone_number)
     user.name = clean_name
-    user.user_code = generate_user_code(phone_number, clean_name)
+    if not user.user_code:
+        user.user_code = generate_user_code(phone_number, clean_name)
     await db.commit()
     return user, user.name
 

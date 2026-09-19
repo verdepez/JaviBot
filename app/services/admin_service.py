@@ -263,7 +263,7 @@ async def handle_admin_command(
     # Menú de ayuda admin
     if norm in {"admin", "ayuda admin", "menu admin", "comandos admin"}:
         msg = (
-            "■ *PANEL DE ADMINISTRADOR* | JaviBot\n"
+            "■ *PANEL DE ADMINISTRADOR* | Pam Anota\n"
             "──────────────────────────\n"
             "Comandos disponibles:\n\n"
             "• `autorizar [teléfono, nombre o código]`\n"
