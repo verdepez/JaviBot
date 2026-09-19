@@ -47,6 +47,7 @@ async def create_company(
     rut: str,
     initial_tax_credit: float | Decimal = Decimal("0.00"),
     ppm_rate: float | Decimal = Decimal("0.0100"),
+    is_exempt_issuer: bool = False,
 ) -> tuple[Company, bool]:
     """Crea una empresa asociada al usuario o actualiza sus datos si ya existe."""
     norm_name = normalize_company_name(name)
@@ -65,6 +66,8 @@ async def create_company(
     if existing is not None:
         existing.name = name.strip()
         existing.rut = clean_r
+        if is_exempt_issuer:
+            existing.is_exempt_issuer = True
         if init_credit > 0:
             existing.initial_tax_credit = init_credit
         await db.commit()
@@ -75,6 +78,7 @@ async def create_company(
         name=name.strip(),
         name_normalized=norm_name,
         rut=clean_r,
+        is_exempt_issuer=is_exempt_issuer,
         initial_tax_credit=init_credit,
         ppm_rate=ppm,
     )
@@ -88,6 +92,18 @@ async def create_company(
     await db.commit()
 
     return company, True
+
+
+async def set_company_exempt_status(
+    db: AsyncSession,
+    company: Company,
+    is_exempt: bool,
+) -> Company:
+    """Configura si la empresa emite facturas exentas por defecto (DTE 34)."""
+    company.is_exempt_issuer = is_exempt
+    await db.commit()
+    await db.refresh(company)
+    return company
 
 
 async def list_user_companies(db: AsyncSession, user_id: int) -> list[Company]:

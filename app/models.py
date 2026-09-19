@@ -45,6 +45,7 @@ class Company(Base):
     name: Mapped[str] = mapped_column(String(100))
     name_normalized: Mapped[str] = mapped_column(String(100), index=True)
     rut: Mapped[str] = mapped_column(String(20))
+    is_exempt_issuer: Mapped[bool] = mapped_column(Boolean, default=False)
     initial_tax_credit: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=Decimal("0.00"))
     ppm_rate: Mapped[Decimal] = mapped_column(Numeric(5, 4), default=Decimal("0.0100"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -122,6 +123,7 @@ class TaxDocument(Base):
     doc_type: Mapped[str] = mapped_column(String(20))  # FACTURA, BOLETA, NOTA_CREDITO
     counterpart_name: Mapped[str] = mapped_column(String(150), default="")
     counterpart_rut: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    is_exempt: Mapped[bool] = mapped_column(Boolean, default=False)
     net_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
     iva_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
     total_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))

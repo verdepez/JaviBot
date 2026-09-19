@@ -33,3 +33,6 @@ class ExtractionResult(BaseModel):
     is_net_amount: bool = False
     net_amount: float | None = Field(default=None, ge=0)
     iva_amount: float | None = Field(default=None, ge=0)
+    is_exempt: bool = False
+    company_is_exempt: bool | None = None
+    set_company_exempt: bool | None = None

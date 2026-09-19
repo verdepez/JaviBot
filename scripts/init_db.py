@@ -41,6 +41,14 @@ async def init_db() -> None:
                         ALTER TABLE budgets ADD COLUMN IF NOT EXISTS budget_type VARCHAR(20) DEFAULT 'PERSONAL';
                         ALTER TABLE budgets ADD COLUMN IF NOT EXISTS company_id INTEGER;
                     END IF;
+
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'companies') THEN
+                        ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_exempt_issuer BOOLEAN DEFAULT FALSE;
+                    END IF;
+
+                    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'tax_documents') THEN
+                        ALTER TABLE tax_documents ADD COLUMN IF NOT EXISTS is_exempt BOOLEAN DEFAULT FALSE;
+                    END IF;
                 END $$;
                 """
             )

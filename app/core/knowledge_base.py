@@ -213,20 +213,39 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
 
     # 0. Creación y gestión de empresas
     m_company = re.search(
-        r"^(?:crear|agregar|nueva|registrar)\s+empresa\s+(.+?)\s+rut\s+([0-9kK\.\-]+)(?:\s+(?:con\s+)?remanente\s+(?:de\s+)?\$?([0-9][0-9\.,\s]*))?$",
+        r"^(?:crear|agregar|nueva|registrar)\s+empresa\s+(.+?)\s+rut\s+([0-9kK\.\-]+)(.*)$",
         raw,
         re.IGNORECASE,
     )
     if m_company:
         c_name = m_company.group(1).strip()
         c_rut = m_company.group(2).strip()
-        c_rem = parse_amount(m_company.group(3)) if m_company.group(3) else 0.0
+        tail = m_company.group(3).strip().lower()
+        c_exempt = bool(re.search(r"\b(?:es\s+)?(?:exenta|no\s+afecta)\b", tail))
+        m_rem = re.search(r"(?:remanente|cr[eé]dito)\s*(?:fiscal)?(?:\s+de)?\s*\$?([0-9][0-9\.,\s]*)", tail)
+        c_rem = parse_amount(m_rem.group(1)) if m_rem else 0.0
         return ExtractionResult(
             is_company_creation=True,
             company_name=c_name,
             company_rut=c_rut,
             initial_credit=c_rem or 0.0,
+            company_is_exempt=c_exempt,
         )
+
+    # 0a. Configurar empresa activa como exenta o afecta
+    m_set_exempt = re.search(
+        r"^(?:empresa|mi\s+empresa|configurar\s+empresa|configurar)?\s*(?:es\s+)?(?:factura\s+)?exenta\s+(si|no|sí|true|false)$",
+        norm,
+    )
+    if not m_set_exempt:
+        m_set_exempt = re.search(
+            r"^(?:mi\s+empresa\s+)(es\s+exenta|no\s+es\s+exenta)$",
+            norm,
+        )
+    if m_set_exempt:
+        val_str = m_set_exempt.group(1).strip().lower()
+        is_ex = val_str in {"si", "sí", "true", "es exenta"}
+        return ExtractionResult(set_company_exempt=is_ex)
 
     # 0b. Conmutación de modo (Personal vs Empresa)
     m_mode = re.search(r"^modo\s+(.+)$", norm)
@@ -245,48 +264,56 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
     if norm in {"iva", "impuestos", "impuesto", "f29", "formulario 29", "mi iva", "balance tributario", "cuanto iva debo", "cuánto iva debo", "cuanto debo de iva", "cuánto debo de iva"}:
         return ExtractionResult(is_tax_inquiry=True)
 
-    # 0e. Facturas Emitidas (Ventas con IVA Débito Fiscal)
+    # 0e. Facturas Emitidas (Ventas con IVA Débito Fiscal o Exentas)
+    is_emit_ex = bool(re.search(r"\b(?:exenta|no\s+afecta)\b", raw, re.IGNORECASE))
     m_f_emit = re.search(
-        r"^(?:emit[ií]|hice|venta(?:\s+en)?)\s+(?:una\s+)?factura(?:\s+(?:por|de))?\s+\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva))?(?:\s+(?:a|para)\s+(.+))?$",
+        r"^(?:emit[ií]|hice|venta(?:\s+en)?)\s+(?:una\s+)?factura(?:\s+exenta|\s+no\s+afecta|\s+afecta)?(?:\s+(?:por|de))?\s+\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva|exenta|no\s+afecta|afecta))?(?:\s+(?:a|para)\s+(.+))?$",
         raw,
         re.IGNORECASE,
     )
     if not m_f_emit:
         m_f_emit = re.search(
-            r"^factura\s+emitida(?:\s+(?:por|de))?\s+\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva))?(?:\s+(?:a|para)\s+(.+))?$",
+            r"^factura(?:\s+exenta|\s+no\s+afecta|\s+afecta)?\s+emitida(?:\s+(?:por|de))?\s+\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva|exenta|no\s+afecta|afecta))?(?:\s+(?:a|para)\s+(.+))?$",
             raw,
             re.IGNORECASE,
         )
     if m_f_emit:
         amt = parse_amount(m_f_emit.group(1))
-        is_net = bool(m_f_emit.group(2) and "neto" in m_f_emit.group(2).lower())
+        tag = (m_f_emit.group(2) or "").lower()
         counterpart = m_f_emit.group(3).strip() if m_f_emit.group(3) else ""
+        is_net = bool("neto" in tag)
         if amt:
+            doc_type = "FACTURA_EXENTA" if is_emit_ex else "FACTURA"
             return ExtractionResult(
                 tax_doc_direction="EMITTED",
-                tax_doc_type="FACTURA",
+                tax_doc_type=doc_type,
+                is_exempt=is_emit_ex,
                 total_spent=amt,
                 is_net_amount=is_net,
                 net_amount=amt if is_net else None,
                 counterpart=counterpart,
-                items=[ExtractedItem(name=f"Factura emitida {counterpart}".strip(), quantity=1, unit_price=amt, total=amt, category="trabajo_insumos")],
+                items=[ExtractedItem(name=f"Factura {'exenta ' if is_emit_ex else ''}emitida {counterpart}".strip(), quantity=1, unit_price=amt, total=amt, category="trabajo_insumos")],
             )
 
-    # 0f. Facturas Recibidas (Compras con IVA Crédito Fiscal)
+    # 0f. Facturas Recibidas (Compras con IVA Crédito Fiscal o Exentas)
+    is_rec_ex = bool(re.search(r"\b(?:exenta|no\s+afecta)\b", raw, re.IGNORECASE))
     m_f_rec = re.search(
-        r"^(?:recib[ií]\s+factura|factura\s+compra|compra\s+con\s+factura|factura)(?:\s+de|\s+por)?\s+(?:(.+?)\s+)?\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva))?$",
+        r"^(?:recib[ií]\s+factura(?:\s+exenta|\s+no\s+afecta)?|factura(?:\s+exenta|\s+no\s+afecta)?\s+compra|compra\s+con\s+factura(?:\s+exenta|\s+no\s+afecta)?|factura\s+exenta|factura\s+no\s+afecta|factura)(?:\s+(?:de|por))?\s+(?:(.+?)\s+)?\$?([0-9][0-9\.,]*)(?:\s*(?:pesos|clp|\$))?(?:\s+(neto|con\s+iva|exenta|no\s+afecta))?$",
         raw,
         re.IGNORECASE,
     )
     if m_f_rec:
         desc = clean_concept(m_f_rec.group(1) or "")
         amt = parse_amount(m_f_rec.group(2))
-        is_net = bool(m_f_rec.group(3) and "neto" in m_f_rec.group(3).lower())
+        tag = (m_f_rec.group(3) or "").lower()
+        is_net = bool("neto" in tag)
         if amt:
-            concept = desc.capitalize() if desc else "Insumos y servicios"
+            concept = desc.capitalize() if desc else ("Factura exenta" if is_rec_ex else "Insumos y servicios")
+            doc_type = "FACTURA_EXENTA" if is_rec_ex else "FACTURA"
             return ExtractionResult(
                 tax_doc_direction="RECEIVED",
-                tax_doc_type="FACTURA",
+                tax_doc_type=doc_type,
+                is_exempt=is_rec_ex,
                 total_spent=amt,
                 is_net_amount=is_net,
                 net_amount=amt if is_net else None,
