@@ -205,6 +205,7 @@ async def init_db() -> None:
                   AND total_amount != 45983.00;
                 """
             )
+        )
         # 3. Inicializar patrones base de lenguaje y vocabulario chileno (Cold-Start)
         await connection.execute(
             text(
