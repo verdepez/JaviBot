@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -156,3 +156,30 @@ class ProcessedMessage(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     message_id: Mapped[str] = mapped_column(String(128), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class LearnedPattern(Base):
+    __tablename__ = "learned_patterns"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pattern_template: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    intent: Mapped[str] = mapped_column(String(50), index=True)  # EXPENSE, BUDGET, TAX_DOC, INQUIRY, CHITCHAT
+    category_default: Mapped[str] = mapped_column(String(80), default="otros")
+    doc_direction: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    doc_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    is_exempt: Mapped[bool] = mapped_column(Boolean, default=False)
+    hit_count: Mapped[int] = mapped_column(Integer, default=1)
+    confidence_score: Mapped[float] = mapped_column(Float, default=0.90)
+    response_template: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LearnedVocabulary(Base):
+    __tablename__ = "learned_vocabulary"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    term: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    canonical_category: Mapped[str] = mapped_column(String(80), index=True)
+    multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

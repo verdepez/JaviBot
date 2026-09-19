@@ -38,6 +38,10 @@ Analiza texto, audio o imágenes de compras. Devuelve únicamente el JSON que cu
 - Si no hay gastos ni consultas, devuelve total_spent=0, items=[] e is_budget_setup=false."""
 
 
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.ml_engine import learn_from_external_result, try_parse_text_ml
+
+
 class GeminiExtractor:
     def __init__(self) -> None:
         self.client = genai.Client(api_key=settings.gemini_api_key)
@@ -47,15 +51,26 @@ class GeminiExtractor:
         input_type: str,
         content: str | bytes,
         mime_type: str | None = None,
+        db: AsyncSession | None = None,
     ) -> ExtractionResult:
         contents: Any
+        raw_text_for_learning: str | None = None
+
         if input_type == "text":
             contents = content if isinstance(content, str) else content.decode()
-            # 1. Intentar extracción local inmediata con la base de conocimiento (0 cuota de API, respuesta instantánea)
+            raw_text_for_learning = contents
+            # 1. Intentar extracción local inmediata con la base de conocimiento determinista (0 tokens)
             local_res = try_parse_text_locally(contents)
             if local_res is not None:
-                print(f"--> [EXTRACTOR] Extracción local KB (0 consumo Gemini): gasto={local_res.total_spent}, presupuesto={local_res.budget_amount}, items={len(local_res.items)}")
+                print(f"--> [EXTRACTOR] Extracción local KB (0 consumo): gasto={local_res.total_spent}, presupuesto={local_res.budget_amount}, items={len(local_res.items)}")
                 return local_res
+
+            # 2. Intentar extracción con motor ML local y patrones adquiridos (0 tokens)
+            if db is not None:
+                ml_res = await try_parse_text_ml(contents, db)
+                if ml_res is not None:
+                    print(f"--> [EXTRACTOR] Extracción local ML Engine (0 tokens externos): gasto={ml_res.total_spent}, items={len(ml_res.items)}")
+                    return ml_res
         else:
             if not isinstance(content, bytes) or not mime_type:
                 raise ValueError("El contenido multimodal requiere bytes y mime_type")
@@ -66,15 +81,26 @@ class GeminiExtractor:
                 transcript = await transcribe_audio_groq(content, clean_mime, settings.groq_api_key)
                 if transcript:
                     print(f"--> [EXTRACTOR] Audio transcrito por Groq Whisper: '{transcript}'")
+                    raw_text_for_learning = transcript
                     # 1. Intentar resolver localmente con la KB
                     local_audio_res = try_parse_text_locally(transcript)
                     if local_audio_res is not None:
                         print("--> [EXTRACTOR] Audio resuelto localmente con KB (0 tokens consumidos)")
                         return local_audio_res
-                    # 2. Si no coincidió con la KB, intentar con Groq Llama
+
+                    # 2. Intentar resolver con motor ML local
+                    if db is not None:
+                        ml_audio_res = await try_parse_text_ml(transcript, db)
+                        if ml_audio_res is not None:
+                            print("--> [EXTRACTOR] Audio resuelto localmente con ML Engine (0 tokens consumidos)")
+                            return ml_audio_res
+
+                    # 3. Si no coincidió localmente, intentar con Groq Llama
                     groq_res = await extract_with_groq(transcript, settings.groq_api_key, settings.groq_model)
                     if groq_res is not None:
                         print("--> [EXTRACTOR] Audio resuelto por Groq Llama (0 cuota Gemini)")
+                        if db is not None and raw_text_for_learning:
+                            asyncio.create_task(learn_from_external_result(db, raw_text_for_learning, groq_res))
                         return groq_res
                     # Si Groq falló o no pudo, enviar el texto a Gemini (mucho más ligero que audio en crudo)
                     contents = transcript
@@ -83,7 +109,7 @@ class GeminiExtractor:
             if input_type != "text":
                 contents = [types.Part.from_bytes(data=content, mime_type=clean_mime)]
 
-        # 2. Si no se resolvió localmente o es audio/imagen, consultar Gemini con modelos activos y fallback
+        # 3. Si no se resolvió localmente o es imagen, consultar Gemini con modelos activos y fallback
         candidate_models = [
             settings.gemini_model,
             "gemini-3.6-flash",
@@ -109,10 +135,21 @@ class GeminiExtractor:
                             response_schema=ExtractionResult,
                         ),
                     )
+                    parsed_res: ExtractionResult | None = None
                     if response.parsed:
-                        return ExtractionResult.model_validate(response.parsed)
-                    if response.text:
-                        return ExtractionResult.model_validate_json(response.text)
+                        parsed_res = ExtractionResult.model_validate(response.parsed)
+                    elif response.text:
+                        parsed_res = ExtractionResult.model_validate_json(response.text)
+
+                    if parsed_res is not None:
+                        # Bucle de aprendizaje pasivo: absorber la estructura del mensaje para responder localmente en el futuro
+                        if db is not None and raw_text_for_learning:
+                            try:
+                                await learn_from_external_result(db, raw_text_for_learning, parsed_res)
+                            except Exception as l_err:
+                                print(f"--> [EXTRACTOR] Aviso al aprender de Gemini: {l_err}")
+                        return parsed_res
+
                     raise ValueError("Gemini no devolvió una extracción válida")
                 except (errors.APIError, Exception) as err:
                     last_err = err
@@ -132,6 +169,12 @@ class GeminiExtractor:
             groq_fallback = await extract_with_groq(contents, settings.groq_api_key, settings.groq_model)
             if groq_fallback is not None:
                 print("--> [EXTRACTOR] Resuelto con éxito por Groq de respaldo final")
+                if db is not None and raw_text_for_learning:
+                    try:
+                        await learn_from_external_result(db, raw_text_for_learning, groq_fallback)
+                    except Exception:
+                        pass
                 return groq_fallback
 
         raise last_err or ValueError("Gemini no devolvió una extracción válida")
+

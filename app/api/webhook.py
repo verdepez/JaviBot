@@ -10,12 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.formatters import format_currency
+from app.core.security import mask_phone
 from app.core.timezone import get_now
 from app.db import get_db
 from app.models import Company, ProcessedMessage, User
 from app.schemas import ExtractionResult
 from app.services.admin_service import handle_admin_command, is_admin_phone
 from app.services.analytics_service import format_spending_analysis, get_spending_analysis
+from app.services.dialogue_engine import DialogueEngine
 from app.services.company_service import (
     create_company,
     get_active_company,
@@ -23,6 +25,7 @@ from app.services.company_service import (
     is_company_timeout_exceeded,
     list_user_companies,
     save_pending_action,
+    set_company_exempt_status,
     switch_mode,
     touch_company_action,
 )
@@ -77,7 +80,7 @@ def get_help_message(
         mode_str = "PERSONAL (Hogar)"
 
     return (
-        f"■ *JAVIBOT* | Control de Gastos & F29\n"
+        f"■ *PAM ANOTA* | Control de Gastos & F29\n"
         f"▪ ID Usuario: `{user_code}`\n"
         f"▪ Usuario: *{user_name}*\n"
         f"▪ Modo Activo: *{mode_str}*\n"
@@ -88,14 +91,19 @@ def get_help_message(
         "• *Ver tus empresas:* `mis empresas`\n"
         "• *Crear nueva empresa:*\n"
         "  `crear empresa [Nombre] rut [RUT] remanente [Monto]`\n"
-        "  _Ej: `crear empresa TecnoSpA rut 76.123.456-7 remanente 80000`_\n\n"
+        "  _Ej: `crear empresa Consultora rut 76.123.456-7 remanente 0 exenta`_\n\n"
         "[2] *GESTIÓN EMPRESA Y F29 (Chile / SII):*\n"
-        "• *Factura de Venta (Débito Fiscal):*\n"
+        "• *Factura de Venta (Débito Fiscal 19%):*\n"
         "  `Emití factura por 1.190.000 a Cliente X`\n"
+        "• *Factura Exenta Venta (DTE 34, 0% IVA):*\n"
+        "  `Emití factura exenta por 500.000`\n"
         "• *Factura de Compra (Recupera 19% IVA):*\n"
         "  `Factura compra insumos 238.000`\n"
+        "• *Factura Exenta Compra (Gasto deducible, $0 crédito IVA):*\n"
+        "  `Factura exenta compra 150.000`\n"
         "• *Boleta de Compra (Gasto sin crédito IVA):*\n"
         "  `Boleta materiales 45.000`\n"
+        "• *Definir emisor exento:* `empresa exenta si` / `empresa exenta no`\n"
         "• *Presupuesto mensual empresa:* `Presupuesto 3000000`\n"
         "• *Liquidación y cálculo de impuestos:* `iva`, `impuestos` o `f29`\n\n"
         "[3] *GASTOS PERSONALES (en Modo Personal):*\n"
@@ -229,7 +237,7 @@ async def verify_webhook(
 @router.post("")
 async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
     payload = await request.json()
-    print(f"--> [WEBHOOK] Payload recibido: {payload}")
+    print(f"--> [WEBHOOK] Evento recibido (object: {payload.get('object', 'unknown')})")
     phone = None
     try:
         entry = payload.get("entry", [])
@@ -287,14 +295,14 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 admin_res = await handle_admin_command(db, phone, raw_text)
                 if admin_res:
                     admin_reply, target_u, target_num = admin_res
-                    print(f"--> [WEBHOOK] Comando admin ejecutado por {phone}: {admin_reply}")
+                    print(f"--> [WEBHOOK] Comando admin ejecutado por {mask_phone(phone)}: {admin_reply}")
                     await whatsapp.send_text(phone, admin_reply)
 
                     # Si se autorizó exitosamente a un usuario, enviar mensaje de bienvenida directo a su WhatsApp
                     if target_u and target_num:
                         try:
                             client_welcome = (
-                                f"✓ *¡Hola {target_u.name}! Tu acceso a JaviBot ha sido activado.*\n"
+                                f"✓ *¡Hola {target_u.name}! Tu acceso a Pam Anota ha sido activado.*\n"
                                 f"▪ ID Usuario: `{target_u.user_code}`\n\n"
                                 "Ya puedes comenzar a usar el servicio:\n"
                                 "• *Configura tu presupuesto:* `Presupuesto 500000`\n"
@@ -310,7 +318,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
 
         # 2. Control de Acceso: Verificar si el usuario está bloqueado
         if user.status == "BLOCKED":
-            print(f"--> [WEBHOOK] Usuario bloqueado intentó acceder: {phone}")
+            print(f"--> [WEBHOOK] Usuario bloqueado intentó acceder: {mask_phone(phone)}")
             await whatsapp.send_text(
                 phone,
                 "[!] *Acceso inactivo*\n"
@@ -339,10 +347,10 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             if is_hire_request:
                 user.status = "PENDING"
                 await db.commit()
-                print(f"--> [WEBHOOK] Prospecto registrado: {user.name} ({phone})")
+                print(f"--> [WEBHOOK] Prospecto registrado: {user.name} ({mask_phone(phone)})")
 
                 prospect_reply = (
-                    "■ *SOLICITUD RECIBIDA* | JaviBot\n"
+                    "■ *SOLICITUD RECIBIDA* | Pam Anota\n"
                     "──────────────────────────\n"
                     f"✓ ¡Gracias por tu interés, *{user.name}*!\n"
                     "▪ Hemos registrado tu solicitud de activación.\n"
@@ -377,7 +385,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                         f"[!] *Período de prueba finalizado*, {user.name}.\n"
                         "──────────────────────────\n"
                         f"Has alcanzado el límite de {settings.free_trial_max_expenses} registros de prueba gratuita.\n\n"
-                        "▸ Para continuar utilizando JaviBot de forma ilimitada, responde *SI* para contratar tu plan mensual."
+                        "▸ Para continuar utilizando Pam Anota de forma ilimitada, responde *SI* para contratar tu plan mensual."
                     )
                     await whatsapp.send_text(phone, trial_ended_msg)
                     return {"status": "processed"}
@@ -386,7 +394,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
 
             if not is_in_trial:
                 pitch_msg = (
-                    "■ *JAVIBOT* | Control de Gastos Inteligente\n"
+                    "■ *PAM ANOTA* | Control de Gastos Inteligente\n"
                     "──────────────────────────\n"
                     f"Hola *{user.name}*, este es un servicio privado de gestión financiera personal y tributaria para empresas vía WhatsApp.\n\n"
                     "▪ *Características principales:*\n"
@@ -430,6 +438,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                             net_amount=pending.get("net_amount"),
                             counterpart=pending.get("counterpart", ""),
                             description=pending.get("description", ""),
+                            is_exempt=pending.get("is_exempt", False),
                             raw_input_type=pending.get("raw_input_type", "text"),
                         )
                         f29_str = f"🏛️ Saldo F29 proyectado: {format_currency(summary['iva_a_pagar'])} a pagar." if summary['iva_a_pagar'] > 0 else f"💰 Remanente F29 a favor: {format_currency(summary['remanente_nuevo'])}."
@@ -498,10 +507,16 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                         await whatsapp.send_text(phone, confirm_msg)
                         return {"status": "processed"}
 
-            # Comandos de ayuda
-            if norm in {"ayuda", "help", "menu", "menú", "inicio", "start", "hola", "buenas", "como funciona", "cómo funciona"}:
+            # Comandos de ayuda explícita
+            if norm in {"ayuda", "help", "menu", "menú", "inicio", "start", "como funciona", "cómo funciona", "comandos"}:
                 print(f"--> [WEBHOOK] Enviando mensaje de ayuda a {user.name}")
                 await whatsapp.send_text(phone, get_help_message(user.name, user.user_code, user.active_mode, comp_name))
+                return {"status": "processed"}
+
+            # Saludos, agradecimientos y personalidad conversacional Pam Anota (0 tokens IA)
+            chitchat_reply = DialogueEngine.try_respond_chitchat(content, user.name)
+            if chitchat_reply:
+                await whatsapp.send_text(phone, chitchat_reply)
                 return {"status": "processed"}
 
             # Listado de empresas
@@ -593,8 +608,8 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             print(f"--> [WEBHOOK] Tipo no soportado: {input_type}")
             return {"status": "ignored"}
 
-        # 6. Extracción (Base de conocimiento local de 0 tokens prioritaria + fallback Gemini/Groq)
-        extraction = await extractor.extract(input_type, content, mime_type)
+        # 6. Extracción (Base de conocimiento local de 0 tokens prioritaria + motor ML local + fallback Gemini/Groq)
+        extraction = await extractor.extract(input_type, content, mime_type, db=db)
         print(f"--> [WEBHOOK] Extracción: {extraction}")
 
         # Si el usuario solicitó crear una empresa
@@ -605,16 +620,35 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 name=extraction.company_name,
                 rut=extraction.company_rut,
                 initial_tax_credit=extraction.initial_credit or 0.0,
+                is_exempt_issuer=extraction.company_is_exempt or False,
             )
             action_label = "creada y activada" if is_new else "actualizada y activada"
+            exempt_badge = " _(Emisor Exento DTE 34)_" if comp_obj.is_exempt_issuer else ""
             reply = (
-                f"✓ *Empresa {action_label} con éxito*\n"
+                f"✓ *Empresa {action_label} con éxito*{exempt_badge}\n"
                 f"▪ Nombre: *{comp_obj.name}*\n"
                 f"▪ RUT: `{comp_obj.rut}`\n"
+                f"▪ Emite Exento: {'Sí (DTE 34: 0% Débito IVA)' if comp_obj.is_exempt_issuer else 'No (DTE 33: 19% Débito IVA)'}\n"
                 f"▪ Remanente Inicial IVA: {format_currency(comp_obj.initial_tax_credit)}\n"
                 f"▪ *Modo Activo:* Has entrado en *Modo Empresa ({comp_obj.name})*.\n\n"
                 "▸ Para volver a tus gastos personales en cualquier momento, escribe `modo personal`."
             )
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        # Si el usuario configuró el estado de emisor exento para su empresa
+        if extraction.set_company_exempt is not None:
+            if user.active_mode != "EMPRESA" or not active_comp:
+                reply = "[!] Debes activar una empresa antes de configurar si es exenta. Escribe `modo [nombre de tu empresa]`."
+            else:
+                await touch_company_action(db, user)
+                active_comp = await set_company_exempt_status(db, active_comp, extraction.set_company_exempt)
+                status_txt = "EMISOR EXENTO (DTE 34: 0% IVA Débito)" if active_comp.is_exempt_issuer else "EMISOR AFECTO (DTE 33: 19% IVA Débito)"
+                reply = (
+                    f"✓ Configuración actualizada para *{active_comp.name}*.\n"
+                    f"▪ Estado: *{status_txt}*.\n"
+                    f"▪ A partir de ahora, sus facturas emitidas por defecto serán {'exentas de IVA' if active_comp.is_exempt_issuer else 'con 19% de IVA'}."
+                )
             await whatsapp.send_text(phone, reply)
             return {"status": "processed"}
 
@@ -632,7 +666,8 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             else:
                 lines = ["■ *TUS EMPRESAS*", "──────────────────────────"]
                 for c in companies:
-                    lines.append(f"• *{c.name}* (RUT: `{c.rut}`) -> `modo {c.name.lower()}`")
+                    ex_badge = " _[Exenta]_" if getattr(c, "is_exempt_issuer", False) else ""
+                    lines.append(f"• *{c.name}*{ex_badge} (RUT: `{c.rut}`) -> `modo {c.name.lower()}`")
                 reply = "\n".join(lines)
             await whatsapp.send_text(phone, reply)
             return {"status": "processed"}
@@ -689,6 +724,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     "is_net_amount": extraction.is_net_amount,
                     "counterpart": extraction.counterpart or "",
                     "description": item_desc,
+                    "is_exempt": extraction.is_exempt,
                     "raw_input_type": input_type,
                 }
             else:
@@ -710,8 +746,8 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             await whatsapp.send_text(phone, timeout_confirm_msg)
             return {"status": "processed"}
 
-        # Si es un documento tributario explícito (Factura o Boleta)
-        if extraction.tax_doc_type in {"FACTURA", "BOLETA"}:
+        # Si es un documento tributario explícito (Factura, Factura Exenta o Boleta)
+        if extraction.tax_doc_type in {"FACTURA", "FACTURA_EXENTA", "BOLETA"}:
             if is_in_company_mode:
                 await touch_company_action(db, user)
                 doc, tax_sum = await record_tax_document(
@@ -724,15 +760,29 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     net_amount=extraction.net_amount,
                     counterpart=extraction.counterpart or "",
                     description=extraction.items[0].name if extraction.items else "",
+                    is_exempt=extraction.is_exempt,
                     raw_input_type=input_type,
                 )
 
                 if doc.doc_direction == "EMITTED":
+                    if doc.is_exempt or doc.doc_type == "FACTURA_EXENTA":
+                        reply = (
+                            f"✓ *Factura Exenta de Venta emitida ({active_comp.name})*\n"
+                            f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
+                            f"▪ *Débito Fiscal IVA:* $0 (DTE 34: Operación no afecta a IVA)\n"
+                        )
+                    else:
+                        reply = (
+                            f"✓ *Factura de Venta emitida ({active_comp.name})*\n"
+                            f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
+                            f"▪ Monto Neto: {format_currency(doc.net_amount)}\n"
+                            f"▪ *Débito Fiscal (+IVA):* `+{format_currency(doc.iva_amount)}`\n"
+                        )
+                elif doc.is_exempt or doc.doc_type == "FACTURA_EXENTA":
                     reply = (
-                        f"✓ *Factura de Venta emitida ({active_comp.name})*\n"
-                        f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
-                        f"▪ Monto Neto: {format_currency(doc.net_amount)}\n"
-                        f"▪ *Débito Fiscal (+IVA):* `+{format_currency(doc.iva_amount)}`\n"
+                        f"✓ *Factura Exenta de Compra registrada ({active_comp.name})*\n"
+                        f"▪ Gasto total: *{format_currency(doc.total_amount)}* (Gasto operacional deducible)\n"
+                        f"▪ *Crédito Fiscal IVA:* $0 (Sin crédito fiscal)\n"
                     )
                 elif doc.doc_type == "FACTURA":
                     reply = (
@@ -773,31 +823,46 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             await touch_company_action(db, user)
 
         if result_type == "budget":
-            reply = f"✓ Presupuesto mensual configurado{ctx_label}, {user.name}: {format_currency(value)}"
+            reply = DialogueEngine.format_budget_reply(
+                user_name=user.name,
+                total_budget=float(value),
+                remaining=float(value),
+                is_addition=False,
+                is_company=is_in_company_mode,
+                company_name=active_comp.name if active_comp else None,
+            )
         elif result_type == "budget_added":
             summary = await get_monthly_summary(db, phone, profile_name)
-            reply = (
-                f"✓ *Presupuesto ampliado con éxito*{ctx_label}, {user.name}!\n"
-                f"▪ Monto agregado: +{format_currency(value)}\n"
-                f"▪ Nuevo presupuesto: *{format_currency(summary['total_budget'])}*\n"
-                f"▪ Saldo disponible: *{format_currency(summary['remaining'])}*"
+            reply = DialogueEngine.format_budget_reply(
+                user_name=user.name,
+                total_budget=float(summary["total_budget"]),
+                remaining=float(summary["remaining"]),
+                is_addition=True,
+                added_amount=float(value),
+                is_company=is_in_company_mode,
+                company_name=active_comp.name if active_comp else None,
             )
         elif result_type == "unrecognized":
             reply = (
-                f"[!] Hola {user.name}, no detecté un gasto ni consulta.\n\n"
+                f"[!] Hola {user.name} 🐾, no detecté un gasto ni consulta clara.\n\n"
                 "▪ *Opciones disponibles:*\n"
-                "• Registrar gasto: `Almuerzo 4500` o nota de voz\n"
+                "• Registrar gasto: `Almuerzo 4500` o `10 lucas bencina`\n"
                 "• Factura venta: `Emití factura por 1.190.000`\n"
                 "• Factura compra: `Factura insumos 238.000`\n"
                 "• Boleta: `Boleta 45.000`\n"
                 "• Liquidación impuestos: `iva` o `f29`\n"
                 "• Cambiar modo: `modo [empresa]` o `modo personal`\n"
-                "• Ver ayuda: `ayuda`"
+                "• Ver ayuda completa: `ayuda`"
             )
         else:
-            reply = (
-                f"✓ Gasto registrado{ctx_label}, {user.name}: {format_currency(extraction.total_spent)}\n"
-                f"▪ Saldo disponible: {format_currency(value)}"
+            item_name = extraction.items[0].name if extraction.items else "Gasto"
+            reply = DialogueEngine.format_expense_reply(
+                user_name=user.name,
+                item_name=item_name,
+                amount=extraction.total_spent,
+                remaining=float(value),
+                is_company=is_in_company_mode,
+                company_name=active_comp.name if active_comp else None,
             )
             if is_in_trial:
                 user.trial_expense_count += 1
@@ -811,9 +876,9 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 + reply
             )
 
-        print(f"--> [WEBHOOK] Enviando respuesta a {phone}: {reply}")
+        print(f"--> [WEBHOOK] Enviando respuesta a {mask_phone(phone)}: {reply}")
         await whatsapp.send_text(phone, reply)
-        print(f"--> [WEBHOOK] Respuesta enviada con éxito a {phone}")
+        print(f"--> [WEBHOOK] Respuesta enviada con éxito a {mask_phone(phone)}")
         return {"status": "processed"}
     except ValueError as exc:
         print(f"--> [WEBHOOK] ValueError: {exc}")

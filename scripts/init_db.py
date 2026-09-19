@@ -64,10 +64,13 @@ async def init_db() -> None:
                 u_code = generate_user_code(p_num, u_name)
                 await connection.execute(
                     text(
-                        "UPDATE users SET phone_hash = :hash, encrypted_phone = :enc, user_code = :code, name = :name WHERE id = :id"
+                        "UPDATE users SET phone_hash = :hash, encrypted_phone = :enc, user_code = :code, name = :name, phone_number = NULL WHERE id = :id"
                     ),
                     {"hash": p_hash, "enc": p_enc, "code": u_code, "name": u_name, "id": uid},
                 )
+
+        # Garantizar privacidad: asegurar que ninguna fila con hash conserve teléfono en texto plano
+        await connection.execute(text("UPDATE users SET phone_number = NULL WHERE phone_hash IS NOT NULL AND phone_number IS NOT NULL;"))
 
         # Crear índices para optimización de consultas de alto rendimiento (Index-Only Scans y ordenamiento veloz)
         await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_phone_hash ON users (phone_hash);"))
@@ -85,6 +88,10 @@ async def init_db() -> None:
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_companies_user_id ON companies (user_id);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tax_docs_company_month ON tax_documents (company_id, month_year, doc_direction);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tax_docs_user_id ON tax_documents (user_id);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_learned_patterns_intent ON learned_patterns (intent);"))
+        await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_learned_patterns_template ON learned_patterns (pattern_template);"))
+        await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_learned_vocab_term ON learned_vocabulary (term);"))
+        await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_learned_vocab_cat ON learned_vocabulary (canonical_category);"))
 
         # Eliminar índices redundantes si existen (ya cubiertos por los índices compuestos)
         await connection.execute(text("DROP INDEX IF EXISTS ix_expenses_budget_id;"))
@@ -196,6 +203,77 @@ async def init_db() -> None:
                 )
                 WHERE total_amount > 0 AND total_amount < 1000 AND (total_amount != ROUND(total_amount, 0))
                   AND total_amount != 45983.00;
+                """
+            )
+        # 3. Inicializar patrones base de lenguaje y vocabulario chileno (Cold-Start)
+        await connection.execute(
+            text(
+                """
+                INSERT INTO learned_patterns (pattern_template, intent, category_default, doc_direction, doc_type, is_exempt, hit_count, confidence_score)
+                VALUES
+                    ('gaste {amount} en {item}', 'EXPENSE', 'otros', NULL, NULL, FALSE, 10, 0.98),
+                    ('compre {item} en {amount}', 'EXPENSE', 'otros', NULL, NULL, FALSE, 10, 0.98),
+                    ('pague {amount} de {item}', 'EXPENSE', 'otros', NULL, NULL, FALSE, 10, 0.98),
+                    ('anota {amount} en {item}', 'EXPENSE', 'otros', NULL, NULL, FALSE, 10, 0.98),
+                    ('anota {item} {amount}', 'EXPENSE', 'otros', NULL, NULL, FALSE, 10, 0.98),
+                    ('transferi {amount} por {item}', 'EXPENSE', 'otros', NULL, NULL, FALSE, 10, 0.98),
+                    ('{item} {amount}', 'EXPENSE', 'otros', NULL, NULL, FALSE, 5, 0.90),
+                    ('factura emitida {amount}', 'TAX_DOC', 'otros', 'EMITTED', 'FACTURA', FALSE, 10, 0.98),
+                    ('emiti factura {amount}', 'TAX_DOC', 'otros', 'EMITTED', 'FACTURA', FALSE, 10, 0.98),
+                    ('factura recibida {amount}', 'TAX_DOC', 'otros', 'RECEIVED', 'FACTURA', FALSE, 10, 0.98),
+                    ('factura de compra {amount}', 'TAX_DOC', 'otros', 'RECEIVED', 'FACTURA', FALSE, 10, 0.98),
+                    ('factura exenta emitida {amount}', 'TAX_DOC', 'otros', 'EMITTED', 'FACTURA', TRUE, 10, 0.98),
+                    ('factura exenta recibida {amount}', 'TAX_DOC', 'otros', 'RECEIVED', 'FACTURA', TRUE, 10, 0.98),
+                    ('boleta de compra {amount}', 'TAX_DOC', 'otros', 'RECEIVED', 'BOLETA', FALSE, 10, 0.98),
+                    ('presupuesto {amount}', 'BUDGET', 'otros', NULL, NULL, FALSE, 10, 0.98),
+                    ('agregar presupuesto {amount}', 'BUDGET', 'otros', NULL, NULL, FALSE, 10, 0.98),
+                    ('sumar al presupuesto {amount}', 'BUDGET', 'otros', NULL, NULL, FALSE, 10, 0.98)
+                ON CONFLICT (pattern_template) DO NOTHING;
+                """
+            )
+        )
+
+        await connection.execute(
+            text(
+                """
+                INSERT INTO learned_vocabulary (term, canonical_category, multiplier)
+                VALUES
+                    ('lucas', 'otros', 1000.0),
+                    ('luca', 'otros', 1000.0),
+                    ('gamba', 'otros', 100.0),
+                    ('gambas', 'otros', 100.0),
+                    ('palo', 'otros', 1000000.0),
+                    ('palos', 'otros', 1000000.0),
+                    ('bencina', 'transporte', 1.0),
+                    ('combustible', 'transporte', 1.0),
+                    ('metro', 'transporte', 1.0),
+                    ('micro', 'transporte', 1.0),
+                    ('uber', 'transporte', 1.0),
+                    ('colectivo', 'transporte', 1.0),
+                    ('estacionamiento', 'transporte', 1.0),
+                    ('almuerzo', 'alimentacion', 1.0),
+                    ('supermercado', 'alimentacion', 1.0),
+                    ('comida', 'alimentacion', 1.0),
+                    ('pan', 'alimentacion', 1.0),
+                    ('feria', 'alimentacion', 1.0),
+                    ('cafe', 'alimentacion', 1.0),
+                    ('desayuno', 'alimentacion', 1.0),
+                    ('once', 'alimentacion', 1.0),
+                    ('baltilocas', 'ocio', 1.0),
+                    ('cerveza', 'ocio', 1.0),
+                    ('carrete', 'ocio', 1.0),
+                    ('cine', 'ocio', 1.0),
+                    ('bar', 'ocio', 1.0),
+                    ('farmacia', 'salud', 1.0),
+                    ('remedios', 'salud', 1.0),
+                    ('doctor', 'salud', 1.0),
+                    ('arriendo', 'hogar', 1.0),
+                    ('luz', 'cuentas', 1.0),
+                    ('agua', 'cuentas', 1.0),
+                    ('gas', 'cuentas', 1.0),
+                    ('internet', 'cuentas', 1.0),
+                    ('gasto comun', 'hogar', 1.0)
+                ON CONFLICT (term) DO NOTHING;
                 """
             )
         )
