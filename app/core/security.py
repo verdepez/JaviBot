@@ -57,3 +57,14 @@ def generate_user_code(phone: str, name: str) -> str:
     seed = f"{clean_p}:{name.lower().strip()}:{settings.encryption_secret}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8].upper()
     return f"JB-{digest}"
+
+
+def mask_phone(phone: str | None) -> str:
+    """Enmascara un teléfono para proteger la privacidad en logs y vistas (ej: +569****5678)."""
+    if not phone:
+        return ""
+    clean = normalize_phone(phone)
+    if len(clean) <= 4:
+        return "****"
+    return f"+{clean[:3]}****{clean[-4:]}"
+
