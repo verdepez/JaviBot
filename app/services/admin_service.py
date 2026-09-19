@@ -275,6 +275,8 @@ async def handle_admin_command(
             "  - `autorizar JB-1455D61E` (activa por código)\n\n"
             "• `bloquear [teléfono, nombre o código]`\n"
             "  Revoca acceso a un usuario.\n\n"
+            "• `difundir tarjeta`\n"
+            "  Envía la tarjeta de contacto oficial a todos los usuarios activos para que actualicen el nombre a Pam Anota 🐶.\n\n"
             "• `usuarios`\n"
             "  Lista todos los usuarios activos.\n\n"
             "• `prospectos` o `pendientes`\n"
@@ -349,5 +351,9 @@ async def handle_admin_command(
             lines.append(f"• *{l['name']}* | {l['phone']} | {l['date']}")
             lines.append(f"  ▸ Autorizar: `autorizar {l['phone']}`")
         return "\n".join(lines), None, None
+
+    # Difusión masiva de Tarjeta de Contacto
+    if norm in {"difundir tarjeta", "difundir contacto", "difusion tarjeta", "difusión tarjeta", "difusion contacto", "difusión contacto"}:
+        return "BROADCAST_CARD", None, None
 
     return None

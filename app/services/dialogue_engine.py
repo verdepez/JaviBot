@@ -48,7 +48,7 @@ class DialogueEngine:
     ]
 
     WHO_ARE_YOU_RESPONSES = [
-        "¡Soy *Pam Anota*! 🐶🐾 Tu asistente financiera inteligente de WhatsApp. Te ayudo a controlar tu presupuesto personal, registrar boletas y facturas DTE para tu empresa y calcular tu IVA F29 automáticamente.",
+        "¡Soy *Pam Anota*! 🐶🐾 Tu asistente financiera inteligente de WhatsApp. Te ayudo a controlar tu presupuesto personal, registrar boletas y facturas DTE para tu empresa y calcular tu IVA F29 automáticamente.\n\n▸ _Si aún me tienes guardada con mi nombre anterior, escribe `contacto` y te enviaré mi tarjeta para actualizarme con un toque._",
     ]
 
     GOODBYE_RESPONSES = [
@@ -92,7 +92,7 @@ class DialogueEngine:
             "que haces", "qué haces", "cual es tu nombre", "cuál es tu nombre",
             "presentate", "preséntate", "quien sos", "quién sos"
         }
-        if clean in identity_keywords:
+        if clean in identity_keywords or any(clean.startswith(f"{ik} ") for ik in ("quien eres", "quién eres", "como te llamas", "cómo te llamas")):
             return random.choice(cls.WHO_ARE_YOU_RESPONSES)
 
         # 4. Despedidas

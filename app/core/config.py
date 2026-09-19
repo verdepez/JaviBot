@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     meta_access_token: str = ""
     whatsapp_phone_number_id: str = ""
     whatsapp_api_version: str = "v23.0"
+    bot_phone_number: str = ""
     encryption_secret: str = "botgastos-secret-encryption-key-32bytes"
     admin_phone: str = ""
     access_mode: str = "whitelist"

@@ -10,12 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.formatters import format_currency
-from app.core.security import mask_phone
+from app.core.security import mask_phone, normalize_phone
 from app.core.timezone import get_now
 from app.db import get_db
 from app.models import Company, ProcessedMessage, User
 from app.schemas import ExtractionResult
-from app.services.admin_service import handle_admin_command, is_admin_phone
+from app.services.admin_service import handle_admin_command, is_admin_phone, list_active_users
 from app.services.analytics_service import format_spending_analysis, get_spending_analysis
 from app.services.dialogue_engine import DialogueEngine
 from app.services.company_service import (
@@ -114,6 +114,7 @@ def get_help_message(
         "• *Consultar saldo:* `saldo`, `cuanto me queda` o `resumen`\n"
         "• *Diagnóstico y consejos:* `ahorro`, `consejos` o `analisis`\n\n"
         "[4] *OTROS COMANDOS:*\n"
+        "• *Actualizar mi nombre en tu teléfono:* `contacto`\n"
         "• *Deshacer último registro:* `deshacer`\n"
         "• *Consultar compras:* `mis compras` o `compras agosto`\n"
         "• *Personalizar tu nombre:* `Me llamo Carlos`\n"
@@ -247,6 +248,9 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         if not changes:
             return {"status": "ignored"}
         value = changes[0].get("value", {})
+        metadata = value.get("metadata", {})
+        bot_phone_raw = metadata.get("display_phone_number", "")
+        bot_number = settings.bot_phone_number or normalize_phone(bot_phone_raw)
 
         # Ignorar notificaciones de estado (sent, delivered, read)
         messages = value.get("messages")
@@ -295,6 +299,37 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 admin_res = await handle_admin_command(db, phone, raw_text)
                 if admin_res:
                     admin_reply, target_u, target_num = admin_res
+                    if admin_reply == "BROADCAST_CARD":
+                        users_list = await list_active_users(db)
+                        bot_contact_phone = bot_number or phone
+                        sent_count = 0
+                        for u_data in users_list:
+                            u_phone = u_data.get("phone")
+                            if u_phone and u_phone != "Cifrado" and not is_admin_phone(u_phone):
+                                try:
+                                    b_msg = (
+                                        f"¡Hola {u_data.get('name', 'Amigo')}! 🐶🐾\n\n"
+                                        "Me cambié el nombre oficialmente a *Pam Anota* 🐾.\n"
+                                        "Te comparto mi tarjeta de contacto oficial aquí abajo:\n\n"
+                                        "▸ Toca la tarjeta y selecciona *'Actualizar contacto existente'* "
+                                        "(o *'Guardar contacto'*) para que quede guardado con mi nuevo nombre "
+                                        "en tu teléfono con un solo toque."
+                                    )
+                                    await whatsapp.send_text(u_phone, b_msg)
+                                    await whatsapp.send_contact(
+                                        recipient=u_phone,
+                                        phone_number=bot_contact_phone,
+                                        formatted_name="Pam Anota 🐶",
+                                        first_name="Pam",
+                                        last_name="Anota 🐶",
+                                        company="Pam Anota",
+                                    )
+                                    sent_count += 1
+                                except Exception as b_err:
+                                    print(f"--> [ADMIN BROADCAST] Error enviando a {mask_phone(u_phone)}: {b_err}")
+                        await whatsapp.send_text(phone, f"✓ Difusión completada: Tarjeta enviada a {sent_count} usuarios activos.")
+                        return {"status": "processed"}
+
                     print(f"--> [WEBHOOK] Comando admin ejecutado por {mask_phone(phone)}: {admin_reply}")
                     await whatsapp.send_text(phone, admin_reply)
 
@@ -517,6 +552,31 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             chitchat_reply = DialogueEngine.try_respond_chitchat(content, user.name)
             if chitchat_reply:
                 await whatsapp.send_text(phone, chitchat_reply)
+                return {"status": "processed"}
+
+            # Tarjeta de contacto interactiva para actualizar / guardar el contacto como Pam Anota
+            contact_triggers = (
+                "contacto", "tarjeta", "tarjeta de contacto", "actualizar contacto",
+                "guardar contacto", "mi contacto", "como te guardo", "cómo te guardo",
+                "tu contacto", "tu numero", "tu número", "guardar numero", "guardar número"
+            )
+            if any(norm == ct or norm.startswith(ct + " ") for ct in contact_triggers):
+                bot_contact_phone = bot_number or phone
+                intro_card_msg = (
+                    "¡Aquí tienes mi tarjeta de contacto oficial! 🐶🐾\n\n"
+                    "▸ Presiona la tarjeta que aparece abajo y selecciona *'Actualizar contacto existente'* "
+                    "(o *'Guardar contacto'*) para que mi nombre quede actualizado automáticamente como "
+                    "*Pam Anota 🐶* en tu teléfono con un solo toque."
+                )
+                await whatsapp.send_text(phone, intro_card_msg)
+                await whatsapp.send_contact(
+                    recipient=phone,
+                    phone_number=bot_contact_phone,
+                    formatted_name="Pam Anota 🐶",
+                    first_name="Pam",
+                    last_name="Anota 🐶",
+                    company="Pam Anota",
+                )
                 return {"status": "processed"}
 
             # Listado de empresas

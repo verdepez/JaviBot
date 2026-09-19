@@ -25,3 +25,48 @@ class WhatsAppClient:
                 json=payload,
             )
             response.raise_for_status()
+
+    async def send_contact(
+        self,
+        recipient: str,
+        phone_number: str,
+        formatted_name: str = "Pam Anota 🐶",
+        first_name: str = "Pam",
+        last_name: str = "Anota 🐶",
+        company: str = "Pam Anota",
+    ) -> None:
+        clean_p = phone_number.replace("+", "").strip()
+        e164_phone = f"+{clean_p}"
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": recipient,
+            "type": "contacts",
+            "contacts": [
+                {
+                    "name": {
+                        "formatted_name": formatted_name,
+                        "first_name": first_name,
+                        "last_name": last_name,
+                    },
+                    "org": {
+                        "company": company,
+                        "title": "Asistente Financiera",
+                    },
+                    "phones": [
+                        {
+                            "phone": e164_phone,
+                            "type": "WORK",
+                            "wa_id": clean_p,
+                        }
+                    ],
+                }
+            ],
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{self.base_url}/{settings.whatsapp_phone_number_id}/messages",
+                headers={**self.headers, "Content-Type": "application/json"},
+                json=payload,
+            )
+            response.raise_for_status()
