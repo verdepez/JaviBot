@@ -278,10 +278,13 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
             return ExtractionResult(set_company_remanente=amt)
 
     # 0b. Conmutación de modo (Personal vs Empresa)
-    m_mode = re.search(r"^modo\s+(.+)$", norm)
+    if norm in {"personal", "modo personal", "cambiar a personal", "volver a personal", "ir a personal", "cuenta personal"}:
+        return ExtractionResult(target_mode="personal")
+
+    m_mode = re.search(r"^(?:modo|cambiar\s+a\s+modo|cambiar\s+a|ir\s+a|pasar\s+a|volver\s+a)\s+(.+)$", norm)
     if m_mode:
         target = m_mode.group(1).strip()
-        if target in {"personal", "hogar", "casa", "familia", "normal"}:
+        if target in {"personal", "hogar", "casa", "familia", "normal", "cuenta personal"}:
             return ExtractionResult(target_mode="personal")
         else:
             return ExtractionResult(target_mode=target, target_company_name=target)

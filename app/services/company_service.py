@@ -211,17 +211,26 @@ async def switch_mode(
     Retorna mensaje descriptivo y la empresa activa (si aplica).
     """
     clean_target = target_mode.lower().strip()
-    if clean_target in {"personal", "hogar", "casa", "familia", "modo personal"}:
+    if clean_target in {"personal", "hogar", "casa", "familia", "modo personal", "cuenta personal", "gastos personales"}:
         user.active_mode = "PERSONAL"
+        user.active_company_id = None
         user.pending_action_data = None
         await db.commit()
-        return "✓ Has cambiado a *Modo Personal*. Tus registros ahora se imputarán a tus gastos personales sin crédito fiscal.", None
+        msg = (
+            "✓ Has cambiado a *Modo Personal* 🏠.\n"
+            "──────────────────────────\n"
+            "▪ A partir de ahora, todos los gastos y compras que registres serán grabados en tus *gastos personales del hogar* (no afectarán a tu empresa ni al cálculo del F29).\n\n"
+            "▸ Para volver a gestionar una empresa en cualquier momento, escribe `modo [nombre de tu empresa]`."
+        )
+        return msg, None
 
     # Si es modo empresa
     company_name_query = target_company_name or target_mode
-    # Si viene con prefijo 'modo '
+    # Si viene con prefijo 'modo ' o 'empresa '
     if company_name_query.lower().startswith("modo "):
         company_name_query = company_name_query[5:].strip()
+    if company_name_query.lower().startswith("empresa "):
+        company_name_query = company_name_query[8:].strip()
 
     company = await get_company_by_name(db, user.id, company_name_query)
     if not company:
@@ -250,12 +259,15 @@ async def switch_mode(
     user.pending_action_data = None
     await db.commit()
 
-    return (
-        f"✓ Has cambiado a *Modo Empresa* con *{company.name}* (RUT: `{company.rut}`).\n"
-        f"▪ Las facturas recibidas recuperarán IVA (19% crédito fiscal) y las boletas se imputarán como gasto operacional.\n"
-        f"▪ Escribe `modo personal` en cualquier momento para volver a tus gastos de hogar.",
-        company,
+    exempt_label = " _(Emisor Exento DTE 34)_" if getattr(company, "is_exempt_issuer", False) else ""
+    msg = (
+        f"✓ Has cambiado a *Modo Empresa* 🏢 (*{company.name}*{exempt_label} - RUT: `{company.rut}`).\n"
+        "──────────────────────────\n"
+        f"▪ A partir de ahora, todos los gastos, compras y boletas que registres serán grabados en los gastos operacionales de *{company.name}*.\n"
+        f"▪ Tus facturas de venta abonarán al presupuesto de *{company.name}* y tus compras afectarán al cálculo de IVA y F29.\n\n"
+        "▸ Para volver a tus gastos personales en cualquier momento, escribe `modo personal`."
     )
+    return msg, company
 
 
 def is_company_timeout_exceeded(user: User, timeout_seconds: int = 300) -> bool:

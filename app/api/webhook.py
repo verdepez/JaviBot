@@ -504,13 +504,16 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     await whatsapp.send_text(phone, reply)
                     return {"status": "processed"}
 
-            # Opción 2: Cuenta Personal
-            if norm_confirm in {"2", "personal", "mi cuenta", "hogar", "casa"}:
+            # Opción 2: Cuenta Personal (vuelve a Modo Personal)
+            if norm_confirm in {
+                "2", "personal", "gasto personal", "gastos personales", "es personal",
+                "cuenta personal", "mi cuenta", "hogar", "casa", "modo personal",
+            } or any(norm_confirm.startswith(p) for p in ("gasto personal", "es personal", "cuenta personal")):
                 pending = await get_and_clear_pending_action(db, user)
                 if pending:
-                    # Forzar registro en presupuesto personal
-                    original_mode = user.active_mode
+                    # Cambiar permanentemente a Modo Personal como solicitó el usuario
                     user.active_mode = "PERSONAL"
+                    user.active_company_id = None
                     await db.commit()
 
                     if pending.get("kind") == "tax_doc":
@@ -520,14 +523,14 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                         ext_personal = ExtractionResult.model_validate(pending.get("extraction", {}))
 
                     _, val, _ = await record_extraction(db, phone, pending.get("raw_input_type", "text"), ext_personal, profile_name)
-                    # Restaurar modo original
-                    user.active_mode = original_mode
-                    await db.commit()
 
                     reply = (
                         f"✓ *Gasto registrado en tu cuenta Personal*: {format_currency(ext_personal.total_spent)}\n"
                         f"▪ Saldo disponible personal: {format_currency(val)}\n"
-                        f"▸ *Nota:* Al registrarse en Personal, no recupera crédito fiscal IVA."
+                        "──────────────────────────\n"
+                        "▪ *Modo Activo:* Has vuelto a *Modo Personal* 🏠.\n"
+                        "A partir de ahora, todos los gastos que registres serán grabados en tus *gastos personales del hogar* (no afectarán a la empresa ni al cálculo del F29).\n\n"
+                        f"▸ Para volver a tu empresa cuando lo desees, escribe `modo {comp_norm or 'empresa'}`."
                     )
                     await whatsapp.send_text(phone, reply)
                     return {"status": "processed"}
@@ -861,8 +864,8 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             timeout_confirm_msg = (
                 f"⚠️ *Han pasado más de 5 minutos desde tu última acción en {active_comp.name}.*\n\n"
                 f"¿Dónde deseas registrar este movimiento de *{amt_display}* ({item_desc})?\n\n"
-                f"• Responde *1* para *{active_comp.name}* (Modo Empresa)\n"
-                f"• Responde *2* para *Personal* (Cuenta Personal)\n"
+                f"• Responde *1* para *{active_comp.name}* (sigue en Modo Empresa)\n"
+                f"• Responde *2* para *Personal* (cambia a Modo Personal)\n"
                 f"• O escribe *cancelar*"
             )
             await whatsapp.send_text(phone, timeout_confirm_msg)
