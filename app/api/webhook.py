@@ -667,11 +667,12 @@ async def _process_extraction_result(
     is_in_trial: bool,
 ) -> dict[str, str]:
     if extraction.is_company_creation:
-        if not extraction.company_rut:
+        if not extraction.company_name or not extraction.company_rut:
+            comp_display = extraction.company_name or "tu empresa"
             reply = (
-                f"⚠️ Por favor indica el RUT para registrar o corregir la empresa *{extraction.company_name}*.\n\n"
-                f"▸ Formato: `crear empresa {extraction.company_name} rut [RUT] remanente [Monto] presupuesto [Monto]`\n"
-                f"• Ejemplo: `crear empresa {extraction.company_name} rut 8.670.330-0 remanente 100000 presupuesto 750000`"
+                f"⚠️ Por favor indica el RUT para registrar o corregir la empresa *{comp_display}*.\n\n"
+                f"▸ Formato: `crear empresa {comp_display} rut [RUT] remanente [Monto] presupuesto [Monto]`\n"
+                f"• Ejemplo: `crear empresa PomPomSpA rut 8.670.330-0 remanente 100000 presupuesto 750000`"
             )
             await whatsapp.send_text(phone, reply)
             return {"status": "processed"}
@@ -897,7 +898,7 @@ async def _process_extraction_result(
 
     is_in_company_mode = (user.active_mode == "EMPRESA" and active_comp is not None)
 
-    if is_in_company_mode and is_company_timeout_exceeded(user, timeout_seconds=300):
+    if is_in_company_mode and active_comp is not None and is_company_timeout_exceeded(user, timeout_seconds=300):
         item_desc = extraction.items[0].name if extraction.items else "Registro"
         amt_display = format_currency(extraction.total_spent)
 
@@ -934,7 +935,7 @@ async def _process_extraction_result(
         return {"status": "processed"}
 
     if extraction.tax_doc_type in {"FACTURA", "FACTURA_EXENTA", "BOLETA"}:
-        if is_in_company_mode:
+        if is_in_company_mode and active_comp is not None:
             await touch_company_action(db, user)
             doc, tax_sum = await record_tax_document(
                 db=db,
