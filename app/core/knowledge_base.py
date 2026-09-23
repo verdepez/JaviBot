@@ -95,6 +95,15 @@ def parse_amount(val_str: str, allow_zero: bool = False) -> float | None:
     if not clean:
         return None
 
+    clean_l = clean.lower()
+    if "luca" in clean_l:
+        sub = clean_l.replace("lucas", "").replace("luca", "").strip()
+        try:
+            val_lucas = (float(sub) if sub else 1.0) * 1000.0
+            return val_lucas if val_lucas > 0 or allow_zero else None
+        except ValueError:
+            pass
+
     # Caso 1: Tiene tanto puntos como comas. Ej: "1.000.000,50" o "1,000,000.50"
     if "." in clean and "," in clean:
         last_dot = clean.rfind(".")
@@ -277,7 +286,78 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
         if amt is not None:
             return ExtractionResult(set_company_remanente=amt)
 
+    # 0a-3. Traspaso de presupuesto de Empresa a Personal
+    # Caso 1: Empresa explícita con monto al final
+    # Ej: "mover presupuesto empresa TecnoSpA a personal 50000", "pasar de empresa Consultora a personal 100000"
+    m_trf_comp1 = re.search(
+        r"^(?:mover|pasar|traspasar|transferir)\s+(?:(?:el\s+)?presupuesto\s+)?(?:de\s+(?:la\s+)?)?empresa\s+([a-zA-Z0-9\._\-]+)\s+(?:a|hacia|al)\s+(?:(?:mi\s+)?(?:presupuesto\s+)?personal|cuenta\s+personal)(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*\$?([0-9][0-9\.,\s]*(?:\s*lucas?)?)$",
+        norm,
+    )
+    if m_trf_comp1:
+        comp_target = m_trf_comp1.group(1).strip()
+        amt = parse_amount(m_trf_comp1.group(2))
+        if amt:
+            return ExtractionResult(
+                is_budget_transfer=True,
+                transfer_amount=amt,
+                transfer_from="EMPRESA",
+                transfer_to="PERSONAL",
+                target_company_name=comp_target,
+            )
+
+    # Caso 2: Empresa explícita con monto al inicio
+    # Ej: "mover 50000 de empresa TecnoSpA a personal", "pasar 100000 del presupuesto de la empresa Consultora al personal"
+    m_trf_comp2 = re.search(
+        r"^(?:mover|pasar|traspasar|transferir)\s+\$?([0-9][0-9\.,\s]*(?:\s*lucas?)?)\s+(?:del?\s+)?(?:presupuesto\s+)?(?:de\s+(?:la\s+)?)?empresa\s+([a-zA-Z0-9\._\-]+)\s+(?:a|hacia|al)\s+(?:(?:mi\s+)?(?:presupuesto\s+)?personal|cuenta\s+personal)$",
+        norm,
+    )
+    if m_trf_comp2:
+        amt = parse_amount(m_trf_comp2.group(1))
+        comp_target = m_trf_comp2.group(2).strip()
+        if amt:
+            return ExtractionResult(
+                is_budget_transfer=True,
+                transfer_amount=amt,
+                transfer_from="EMPRESA",
+                transfer_to="PERSONAL",
+                target_company_name=comp_target,
+            )
+
+    # Caso 3: Sin empresa explícita (usa empresa activa o registrada), monto al final
+    # Ej: "mover presupuesto empresa a personal 50000", "mover de empresa a personal 50000", "pasar presupuesto a personal 50000", "mover a personal 50000"
+    m_trf_gen1 = re.search(
+        r"^(?:mover|pasar|traspasar|transferir)\s+(?:(?:el\s+)?presupuesto\s+)?(?:(?:de\s+(?:la\s+)?)?empresa\s+)?(?:a|hacia|al)\s+(?:(?:mi\s+)?(?:presupuesto\s+)?personal|cuenta\s+personal)(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*\$?([0-9][0-9\.,\s]*(?:\s*lucas?)?)$",
+        norm,
+    )
+    if m_trf_gen1:
+        amt = parse_amount(m_trf_gen1.group(1))
+        if amt:
+            return ExtractionResult(
+                is_budget_transfer=True,
+                transfer_amount=amt,
+                transfer_from="EMPRESA",
+                transfer_to="PERSONAL",
+            )
+
+    # Caso 4: Sin empresa explícita, monto al inicio
+    # Ej: "mover 50000 de empresa a personal", "mover 50000 de presupuesto empresa a personal", "mover 50000 a personal", "pasar 80000 a personal"
+    m_trf_gen2 = re.search(
+        r"^(?:mover|pasar|traspasar|transferir)\s+\$?([0-9][0-9\.,\s]*(?:\s*lucas?)?)\s+(?:(?:del?\s+)?(?:presupuesto\s+)?(?:de\s+(?:la\s+)?)?empresa\s+)?(?:a|hacia|al)\s+(?:(?:mi\s+)?(?:presupuesto\s+)?personal|cuenta\s+personal)$",
+        norm,
+    )
+    if m_trf_gen2:
+        amt = parse_amount(m_trf_gen2.group(1))
+        if amt:
+            return ExtractionResult(
+                is_budget_transfer=True,
+                transfer_amount=amt,
+                transfer_from="EMPRESA",
+                transfer_to="PERSONAL",
+            )
+
+
     # 0b. Conmutación de modo (Personal vs Empresa)
+
     if norm in {"personal", "modo personal", "cambiar a personal", "volver a personal", "ir a personal", "cuenta personal"}:
         return ExtractionResult(target_mode="personal")
 

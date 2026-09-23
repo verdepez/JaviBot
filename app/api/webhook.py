@@ -29,6 +29,7 @@ from app.services.company_service import (
     set_company_exempt_status,
     switch_mode,
     touch_company_action,
+    transfer_company_budget_to_personal,
     update_company_remanente,
 )
 from app.services.expense_service import (
@@ -775,6 +776,19 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     f"▪ A partir de ahora, sus facturas emitidas por defecto serán {'exentas de IVA' if active_comp.is_exempt_issuer else 'con 19% de IVA'}."
                 )
             await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        # Si el usuario solicitó transferir presupuesto de empresa a personal
+        if extraction.is_budget_transfer and extraction.transfer_amount:
+            success, receipt_msg, _ = await transfer_company_budget_to_personal(
+                db=db,
+                user=user,
+                amount=extraction.transfer_amount,
+                target_company_name=extraction.target_company_name,
+            )
+            if user.active_mode == "EMPRESA":
+                await touch_company_action(db, user)
+            await whatsapp.send_text(phone, receipt_msg)
             return {"status": "processed"}
 
         # Si el usuario solicitó cambiar de modo

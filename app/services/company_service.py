@@ -1,15 +1,17 @@
 import json
 import re
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.formatters import format_currency
 from app.core.timezone import get_now
-from app.models import Budget, Company, User
+from app.models import Budget, Company, Expense, User
 from app.services.expense_service import active_month
+
 
 
 def normalize_company_name(name: str) -> str:
@@ -270,7 +272,160 @@ async def switch_mode(
     return msg, company
 
 
+async def transfer_company_budget_to_personal(
+    db: AsyncSession,
+    user: User,
+    amount: float | Decimal,
+    target_company_name: str | None = None,
+) -> tuple[bool, str, dict | None]:
+    """
+    Traspasa un monto del presupuesto operacional de una empresa hacia el presupuesto personal del usuario.
+    Genera un comprobante formal con folio y mensaje de respaldo contable.
+    """
+    amt = Decimal(str(amount))
+    if amt <= Decimal("0"):
+        return False, "[!] El monto a transferir debe ser mayor a cero.", None
+
+    # Identificar la empresa origen
+    company = None
+    if target_company_name:
+        clean_target = target_company_name.lower().strip()
+        if clean_target.startswith("modo "):
+            clean_target = clean_target[5:].strip()
+        if clean_target.startswith("empresa "):
+            clean_target = clean_target[8:].strip()
+        company = await get_company_by_name(db, user.id, clean_target)
+        if not company:
+            return False, f"[!] No encontré ninguna empresa llamada *'{target_company_name}'*. Escribe `mis empresas` para ver la lista.", None
+    elif user.active_mode == "EMPRESA" and user.active_company_id:
+        company = await db.get(Company, user.active_company_id)
+
+    if not company:
+        companies = await list_user_companies(db, user.id)
+        if len(companies) == 1:
+            company = companies[0]
+        elif len(companies) > 1:
+            return False, (
+                "[!] Tienes más de una empresa registrada. Por favor indica desde cuál transferir:\n"
+                "▸ `mover presupuesto empresa [Nombre] a personal [Monto]`\n"
+                "Ej: `mover presupuesto empresa TecnoSpA a personal 50000`"
+            ), None
+        else:
+            return False, "[!] No tienes ninguna empresa registrada para transferir presupuesto.", None
+
+    month = active_month()
+
+    # 1. Obtener presupuesto de la empresa para el mes actual
+    company_budget = await db.scalar(
+        select(Budget).where(
+            Budget.user_id == user.id,
+            Budget.company_id == company.id,
+            Budget.month_year == month,
+            Budget.budget_type == "EMPRESA",
+        )
+    )
+
+    if not company_budget or company_budget.total_budget <= Decimal("0"):
+        return False, f"[!] La empresa *{company.name}* no tiene presupuesto asignado para este mes ({month}).", None
+
+    # Calcular gastos ejecutados en la empresa para validar disponibilidad
+    company_spent = await db.scalar(
+        select(func.coalesce(func.sum(Expense.total_amount), Decimal("0"))).where(Expense.budget_id == company_budget.id)
+    ) or Decimal("0")
+    company_available = company_budget.total_budget - company_spent
+
+    if amt > company_available:
+        return False, (
+            f"[!] Fondos insuficientes en el presupuesto operacional de *{company.name}*:\n"
+            f"▪ Presupuesto total empresa: {format_currency(company_budget.total_budget)}\n"
+            f"▪ Gastos ejecutados en el mes: {format_currency(company_spent)}\n"
+            f"▪ Saldo disponible transferible: *{format_currency(company_available)}*\n"
+            f"▪ Monto solicitado a transferir: {format_currency(amt)}\n\n"
+            "▸ No es posible transferir un monto mayor al disponible para no dejar a la empresa en déficit."
+        ), None
+
+    # 2. Obtener o crear presupuesto personal para el mes actual
+    personal_budget = await db.scalar(
+        select(Budget).where(
+            Budget.user_id == user.id,
+            Budget.month_year == month,
+            Budget.budget_type == "PERSONAL",
+        )
+    )
+
+    personal_prev_total = personal_budget.total_budget if personal_budget else Decimal("0")
+
+    if not personal_budget:
+        personal_budget = Budget(
+            user_id=user.id,
+            month_year=month,
+            budget_type="PERSONAL",
+            company_id=None,
+            total_budget=amt,
+        )
+        db.add(personal_budget)
+        await db.flush()
+    else:
+        personal_budget.total_budget += amt
+
+    # 3. Descontar del presupuesto de la empresa
+    company_prev_total = company_budget.total_budget
+    company_budget.total_budget -= amt
+    company_new_available = company_available - amt
+
+    # Calcular saldo disponible actualizado personal
+    personal_spent = await db.scalar(
+        select(func.coalesce(func.sum(Expense.total_amount), Decimal("0"))).where(Expense.budget_id == personal_budget.id)
+    ) or Decimal("0")
+    personal_available = personal_budget.total_budget - personal_spent
+
+    await db.commit()
+
+    # 4. Generar comprobante y mensaje de respaldo
+    now = get_now()
+    unique_suffix = uuid.uuid4().hex[:6].upper()
+    folio = f"TRF-{now.strftime('%Y%m%d')}-{unique_suffix}"
+
+    receipt_msg = (
+        "📄🐾 *COMPROBANTE DE TRASPASO DE PRESUPUESTO*\n"
+        "──────────────────────────\n"
+        f"▪ *Folio de Respaldo:* `{folio}`\n"
+        f"▪ *Fecha y Hora:* {now.strftime('%d/%m/%Y %H:%M:%S')}\n"
+        f"▪ *Origen:* 🏢 *{company.name}* (RUT: `{company.rut}`)\n"
+        f"▪ *Destino:* 🏠 *Presupuesto Personal* ({user.name})\n"
+        f"▪ *Monto Traspasado:* *{format_currency(amt)}*\n"
+        "──────────────────────────\n"
+        f"📊 *ACTUALIZACIÓN DE SALDOS ({month})*:\n\n"
+        f"🏢 *Empresa ({company.name})*:\n"
+        f"  • Presupuesto anterior: {format_currency(company_prev_total)}\n"
+        f"  • Débito por traspaso: -{format_currency(amt)}\n"
+        f"  • Nuevo presupuesto total: {format_currency(company_budget.total_budget)}\n"
+        f"  • Saldo disponible restante: *{format_currency(company_new_available)}*\n\n"
+        f"🏠 *Presupuesto Personal*:\n"
+        f"  • Presupuesto anterior: {format_currency(personal_prev_total)}\n"
+        f"  • Abono por traspaso: +{format_currency(amt)}\n"
+        f"  • Nuevo presupuesto total: {format_currency(personal_budget.total_budget)}\n"
+        f"  • Saldo disponible actualizado: *{format_currency(personal_available)}*\n"
+        "──────────────────────────\n"
+        "ℹ️ *Respaldo Contable:* Traspaso interno de fondos presupuestarios registrado en Pam Anota. "
+        "Este movimiento reasigna presupuesto operacional y no genera débito ni crédito fiscal IVA."
+    )
+
+    data = {
+        "folio": folio,
+        "amount": amt,
+        "company_name": company.name,
+        "company_rut": company.rut,
+        "company_new_total": company_budget.total_budget,
+        "company_new_available": company_new_available,
+        "personal_new_total": personal_budget.total_budget,
+        "personal_new_available": personal_available,
+    }
+    return True, receipt_msg, data
+
+
 def is_company_timeout_exceeded(user: User, timeout_seconds: int = 300) -> bool:
+
     """Verifica si han transcurrido más de 5 minutos (300s) desde la última acción en modo empresa."""
     if user.active_mode != "EMPRESA" or not user.last_company_action_at:
         return False

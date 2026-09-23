@@ -38,3 +38,7 @@ class ExtractionResult(BaseModel):
     company_is_exempt: bool | None = None
     set_company_exempt: bool | None = None
     set_company_remanente: float | None = Field(default=None, ge=0)
+    is_budget_transfer: bool = False
+    transfer_amount: float | None = Field(default=None, ge=0)
+    transfer_from: str | None = None
+    transfer_to: str | None = None
