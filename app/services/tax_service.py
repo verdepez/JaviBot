@@ -253,8 +253,8 @@ async def get_monthly_tax_summary(
             Budget.budget_type == "EMPRESA",
         )
     )
-    budget_total = budget.total_budget if budget else Decimal("0")
-    budget_spent = (
+    budget_total: Decimal = Decimal(str(budget.total_budget)) if (budget and budget.total_budget is not None) else Decimal("0")
+    budget_spent_raw = (
         await db.scalar(
             select(func.coalesce(func.sum(Expense.total_amount), Decimal("0"))).where(
                 Expense.budget_id == budget.id
@@ -263,7 +263,8 @@ async def get_monthly_tax_summary(
         if budget
         else Decimal("0")
     )
-    budget_remaining = budget_total - budget_spent if budget else Decimal("0")
+    budget_spent: Decimal = Decimal(str(budget_spent_raw or "0"))
+    budget_remaining: Decimal = (budget_total - budget_spent) if budget else Decimal("0")
 
     return {
         "company_name": company.name,

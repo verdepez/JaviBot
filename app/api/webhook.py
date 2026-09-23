@@ -243,6 +243,834 @@ async def verify_webhook(
     raise HTTPException(status_code=403, detail="Token de verificación inválido")
 
 
+
+async def _handle_admin_message(
+    db: AsyncSession,
+    phone: str,
+    raw_text: str,
+    user: User,
+    bot_number: str | None,
+) -> bool:
+    admin_res = await handle_admin_command(db, phone, raw_text)
+    if not admin_res:
+        return False
+
+    admin_reply, target_u, target_num = admin_res
+    if admin_reply == "BROADCAST_CARD":
+        users_list = await list_active_users(db)
+        bot_contact_phone = bot_number or phone
+        sent_count = 0
+        for u_data in users_list:
+            u_phone = u_data.get("phone")
+            if u_phone and u_phone != "Cifrado" and not is_admin_phone(u_phone):
+                try:
+                    b_msg = (
+                        f"¡Hola {u_data.get('name', 'Amigo')}! 🐶🐾\n\n"
+                        "Me cambié el nombre oficialmente a *Pam Anota* 🐾.\n"
+                        "Te comparto mi tarjeta de contacto oficial aquí abajo:\n\n"
+                        "▸ Toca la tarjeta y selecciona *'Actualizar contacto existente'* "
+                        "(o *'Guardar contacto'*) para que quede guardado con mi nuevo nombre "
+                        "en tu teléfono con un solo toque."
+                    )
+                    await whatsapp.send_text(u_phone, b_msg)
+                    await whatsapp.send_contact(
+                        recipient=u_phone,
+                        phone_number=bot_contact_phone,
+                        formatted_name="Pam Anota 🐶",
+                        first_name="Pam",
+                        last_name="Anota 🐶",
+                        company="Pam Anota",
+                    )
+                    sent_count += 1
+                except Exception as b_err:
+                    print(f"--> [ADMIN BROADCAST] Error enviando a {mask_phone(u_phone)}: {b_err}")
+        await whatsapp.send_text(phone, f"✓ Difusión completada: Tarjeta enviada a {sent_count} usuarios activos.")
+        return True
+
+    print(f"--> [WEBHOOK] Comando admin ejecutado por {mask_phone(phone)}: {admin_reply}")
+    await whatsapp.send_text(phone, admin_reply)
+
+    if target_u and target_num:
+        try:
+            client_welcome = (
+                f"✓ *¡Hola {target_u.name}! Tu acceso a Pam Anota ha sido activado.*\n"
+                f"▪ ID Usuario: `{target_u.user_code}`\n\n"
+                "Ya puedes comenzar a usar el servicio:\n"
+                "• *Configura tu presupuesto:* `Presupuesto 500000`\n"
+                "• *Registra un gasto:* `Almuerzo 4500` (o envía audio/foto)\n"
+                "• *Consulta tu saldo:* `saldo`\n"
+                "• *Ver ayuda:* `ayuda`"
+            )
+            await whatsapp.send_text(target_num, client_welcome)
+        except Exception as notify_err:
+            print(f"--> [WEBHOOK] Error al notificar bienvenida al cliente: {notify_err}")
+
+    return True
+
+
+async def _handle_access_control(
+    db: AsyncSession,
+    phone: str,
+    user: User,
+    input_type: str,
+    message: dict,
+) -> tuple[bool, bool]:
+    if user.status == "BLOCKED":
+        print(f"--> [WEBHOOK] Usuario bloqueado intentó acceder: {mask_phone(phone)}")
+        await whatsapp.send_text(
+            phone,
+            "[!] *Acceso inactivo*\n"
+            "──────────────────────────\n"
+            f"Hola {user.name}, tu cuenta se encuentra suspendida o inactiva.\n"
+            "▪ Para reactivar tu servicio o resolver dudas, por favor comunícate con el administrador."
+        )
+        return False, False
+
+    if user.status != "ACTIVE" and not user.is_admin:
+        is_hire_request = False
+        if input_type == "text":
+            text_content = message.get("text", {}).get("body", "").strip()
+            norm_text = text_content.lower().strip().strip("¿?¡!.,")
+            hire_triggers = {
+                "si", "sí", "quiero", "contratar", "quiero contratar", "me interesa",
+                "suscribir", "suscribirme", "deseo contratar", "si quiero", "sí quiero",
+                "comprar", "activar", "plan"
+            }
+            if norm_text in hire_triggers or any(norm_text.startswith(t + " ") for t in ("si", "sí", "quiero", "contratar")):
+                is_hire_request = True
+
+        if is_hire_request:
+            user.status = "PENDING"
+            await db.commit()
+            print(f"--> [WEBHOOK] Prospecto registrado: {user.name} ({mask_phone(phone)})")
+
+            prospect_reply = (
+                "■ *SOLICITUD RECIBIDA* | Pam Anota\n"
+                "──────────────────────────\n"
+                f"✓ ¡Gracias por tu interés, *{user.name}*!\n"
+                "▪ Hemos registrado tu solicitud de activación.\n"
+                "▪ Nos comunicaremos contigo a la brevedad para coordinar el pago y activar tu servicio.\n\n"
+                f"▪ ID Solicitud: `{user.user_code}`"
+            )
+            await whatsapp.send_text(phone, prospect_reply)
+
+            if settings.admin_phone:
+                clean_adm = settings.admin_phone.strip().lstrip("+")
+                admin_lead_msg = (
+                    "■ *NUEVO CLIENTE INTERESADO*\n"
+                    "──────────────────────────\n"
+                    f"▪ Nombre: *{user.name}*\n"
+                    f"▪ Teléfono: `{phone}`\n"
+                    f"▪ ID Código: `{user.user_code}`\n\n"
+                    "▸ Para activar su acceso tras recibir el pago, responde:\n"
+                    f"`autorizar {phone}`"
+                )
+                try:
+                    await whatsapp.send_text(clean_adm, admin_lead_msg)
+                except Exception as adm_err:
+                    print(f"--> [WEBHOOK] Error al notificar al admin sobre prospecto: {adm_err}")
+
+            return False, False
+
+        if settings.allow_free_trial:
+            if user.trial_expense_count >= settings.free_trial_max_expenses:
+                trial_ended_msg = (
+                    f"[!] *Período de prueba finalizado*, {user.name}.\n"
+                    "──────────────────────────\n"
+                    f"Has alcanzado el límite de {settings.free_trial_max_expenses} registros de prueba gratuita.\n\n"
+                    "▸ Para continuar utilizando Pam Anota de forma ilimitada, responde *SI* para contratar tu plan mensual."
+                )
+                await whatsapp.send_text(phone, trial_ended_msg)
+                return False, False
+            else:
+                return True, True
+
+        pitch_msg = (
+            "■ *PAM ANOTA* | Control de Gastos Inteligente\n"
+            "──────────────────────────\n"
+            f"Hola *{user.name}*, este es un servicio privado de gestión financiera personal y tributaria para empresas vía WhatsApp.\n\n"
+            "▪ *Características principales:*\n"
+            "• Control dual: Gastos personales y Presupuesto Empresa\n"
+            "• Registro de Facturas (débito/crédito IVA) y Boletas operacionales\n"
+            "• Liquidación mensual estimada de impuestos F29 y PPM\n"
+            "• Registro inmediato por texto, nota de voz o foto de boleta/factura\n"
+            "• Privacidad y datos cifrados\n\n"
+            "▸ *¿Deseas contratar el servicio?*\n"
+            "Responde *SI* para coordinar tu activación."
+        )
+        await whatsapp.send_text(phone, pitch_msg)
+        return False, False
+
+    return True, False
+
+
+async def _handle_timeout_confirmation(
+    db: AsyncSession,
+    phone: str,
+    message: dict,
+    user: User,
+    profile_name: str | None,
+) -> bool:
+    raw_text = message.get("text", {}).get("body", "").strip()
+    norm_confirm = raw_text.lower().strip().strip("¿?¡!.,")
+    active_comp = await get_active_company(db, user)
+    comp_norm = active_comp.name_normalized if active_comp else ""
+
+    if norm_confirm in {"cancelar", "anular", "cancel", "no"}:
+        await get_and_clear_pending_action(db, user)
+        await whatsapp.send_text(phone, "✓ Registro cancelado.")
+        return True
+
+    if norm_confirm in {"1", "empresa", "si", "sí", "confirmar"} or (comp_norm and norm_confirm == comp_norm):
+        pending = await get_and_clear_pending_action(db, user)
+        if pending and active_comp:
+            await touch_company_action(db, user)
+            if pending.get("kind") == "tax_doc":
+                doc, summary = await record_tax_document(
+                    db=db,
+                    user=user,
+                    company=active_comp,
+                    doc_direction=pending.get("doc_direction", "RECEIVED"),
+                    doc_type=pending.get("doc_type", "FACTURA"),
+                    total_amount=pending.get("total_amount", 0),
+                    net_amount=pending.get("net_amount"),
+                    counterpart=pending.get("counterpart", ""),
+                    description=pending.get("description", ""),
+                    is_exempt=pending.get("is_exempt", False),
+                    raw_input_type=pending.get("raw_input_type", "text"),
+                )
+                f29_str = f"🏛️ Saldo F29 actual: {format_currency(summary['iva_a_pagar'])} a pagar." if summary['iva_a_pagar'] > 0 else f"💰 Remanente F29 a favor: {format_currency(summary['remanente_nuevo'])}."
+                if doc.doc_direction == "EMITTED":
+                    abono_val = doc.net_amount if not doc.is_exempt else doc.total_amount
+                    reply = (
+                        f"✓ *{doc.doc_type.capitalize()} de venta emitida en {active_comp.name}*\n"
+                        f"▪ Total Facturado: {format_currency(doc.total_amount)}\n"
+                        f"▪ Abono al Presupuesto Empresa (Neto): +{format_currency(abono_val)}\n"
+                        f"▪ Presupuesto empresa disponible: {format_currency(summary['budget_remaining'])}\n"
+                        f"▪ {f29_str}"
+                    )
+                else:
+                    reply = (
+                        f"✓ *{doc.doc_type.capitalize()} registrada en {active_comp.name}*\n"
+                        f"▪ Monto Total: {format_currency(doc.total_amount)}\n"
+                        f"▪ Presupuesto empresa disponible: {format_currency(summary['budget_remaining'])}\n"
+                        f"▪ {f29_str}"
+                    )
+            else:
+                ext_dict = pending.get("extraction", {})
+                ext_obj = ExtractionResult.model_validate(ext_dict)
+                _, val, _ = await record_extraction(db, phone, pending.get("raw_input_type", "text"), ext_obj, profile_name)
+                reply = f"✓ Gasto registrado en *{active_comp.name}*: {format_currency(ext_obj.total_spent)}\n▪ Presupuesto empresa disponible: {format_currency(val)}"
+
+            await whatsapp.send_text(phone, reply)
+            return True
+
+    if norm_confirm in {
+        "2", "personal", "gasto personal", "gastos personales", "es personal",
+        "cuenta personal", "mi cuenta", "hogar", "casa", "modo personal",
+    } or any(norm_confirm.startswith(p) for p in ("gasto personal", "es personal", "cuenta personal")):
+        pending = await get_and_clear_pending_action(db, user)
+        if pending:
+            user.active_mode = "PERSONAL"
+            user.active_company_id = None
+            await db.commit()
+
+            if pending.get("kind") == "tax_doc":
+                tot = pending.get("total_amount", 0)
+                ext_personal = ExtractionResult(total_spent=tot)
+            else:
+                ext_personal = ExtractionResult.model_validate(pending.get("extraction", {}))
+
+            _, val, _ = await record_extraction(db, phone, pending.get("raw_input_type", "text"), ext_personal, profile_name)
+
+            reply = (
+                f"✓ *Gasto registrado en tu cuenta Personal*: {format_currency(ext_personal.total_spent)}\n"
+                f"▪ Saldo disponible personal: {format_currency(val)}\n"
+                "──────────────────────────\n"
+                "▪ *Modo Activo:* Has vuelto a *Modo Personal* 🏠.\n"
+                "A partir de ahora, todos los gastos que registres serán grabados en tus *gastos personales del hogar* (no afectarán a la empresa ni al cálculo del F29).\n\n"
+                f"▸ Para volver a tu empresa cuando lo desees, escribe `modo {comp_norm or 'empresa'}`."
+            )
+            await whatsapp.send_text(phone, reply)
+            return True
+
+    return False
+
+
+async def _handle_pre_extraction_text(
+    db: AsyncSession,
+    phone: str,
+    content: str,
+    user: User,
+    bot_number: str | None,
+    profile_name: str | None,
+    active_comp: Company | None,
+) -> bool:
+    norm = content.lower().strip().strip("¿?¡!.,")
+    comp_name = active_comp.name if active_comp else None
+
+    # Cambio de nombre del usuario
+    for prefix in ("me llamo ", "mi nombre es ", "llamame ", "llámame ", "cambiar nombre a "):
+        if norm.startswith(prefix):
+            new_name_input = content[len(prefix) :].strip()
+            if new_name_input:
+                user, updated_name = await update_user_name(db, phone, new_name_input)
+                confirm_msg = (
+                    f"✓ Nombre actualizado: *{updated_name}*\n"
+                    f"▪ ID Usuario: `{user.user_code}`"
+                )
+                await whatsapp.send_text(phone, confirm_msg)
+                return True
+
+    # Comandos de ayuda explícita
+    if norm in {"ayuda", "help", "menu", "menú", "inicio", "start", "como funciona", "cómo funciona", "comandos"}:
+        print(f"--> [WEBHOOK] Enviando mensaje de ayuda a {user.name}")
+        await whatsapp.send_text(phone, get_help_message(user.name, user.user_code, user.active_mode, comp_name))
+        return True
+
+    # Saludos, agradecimientos y personalidad conversacional Pam Anota (0 tokens IA)
+    chitchat_reply = DialogueEngine.try_respond_chitchat(content, user.name)
+    if chitchat_reply:
+        await whatsapp.send_text(phone, chitchat_reply)
+        return True
+
+    # Tarjeta de contacto interactiva
+    contact_triggers = (
+        "contacto", "tarjeta", "tarjeta de contacto", "actualizar contacto",
+        "guardar contacto", "mi contacto", "como te guardo", "cómo te guardo",
+        "tu contacto", "tu numero", "tu número", "guardar numero", "guardar número"
+    )
+    if any(norm == ct or norm.startswith(ct + " ") for ct in contact_triggers):
+        bot_contact_phone = bot_number or phone
+        intro_card_msg = (
+            "¡Aquí tienes mi tarjeta de contacto oficial! 🐶🐾\n\n"
+            "▸ Presiona la tarjeta que aparece abajo y selecciona *'Actualizar contacto existente'* "
+            "(o *'Guardar contacto'*) para que mi nombre quede actualizado automáticamente como "
+            "*Pam Anota 🐶* en tu teléfono con un solo toque."
+        )
+        await whatsapp.send_text(phone, intro_card_msg)
+        await whatsapp.send_contact(
+            recipient=phone,
+            phone_number=bot_contact_phone,
+            formatted_name="Pam Anota 🐶",
+            first_name="Pam",
+            last_name="Anota 🐶",
+            company="Pam Anota",
+        )
+        return True
+
+    # Listado de empresas
+    if norm in {"mis empresas", "ver empresas", "empresas", "lista empresas", "mis companias", "mis compañías"}:
+        companies = await list_user_companies(db, user.id)
+        if not companies:
+            msg = (
+                "■ *TUS EMPRESAS*\n"
+                "──────────────────────────\n"
+                "No tienes ninguna empresa registrada aún.\n\n"
+                "▸ Para registrar tu primera empresa, escribe:\n"
+                "`crear empresa [Nombre] rut [RUT] remanente [Monto]`\n\n"
+                "Ej: `crear empresa TecnoSpA rut 76.123.456-7 remanente 80000`"
+            )
+        else:
+            lines = ["■ *TUS EMPRESAS REGISTRADAS*", "──────────────────────────"]
+            for c in companies:
+                active_mark = " ✓ *(Activa)*" if (user.active_mode == "EMPRESA" and user.active_company_id == c.id) else ""
+                lines.append(f"• *{c.name}*{active_mark}")
+                lines.append(f"  RUT: `{c.rut}` | Remanente IVA: {format_currency(c.initial_tax_credit)}")
+                lines.append(f"  ▸ Para activar escribe: `modo {c.name.lower()}`")
+            lines.append("──────────────────────────")
+            lines.append("• Para volver a gastos del hogar: `modo personal`")
+            msg = "\n".join(lines)
+
+        await whatsapp.send_text(phone, msg)
+        return True
+
+    # Liquidación F29 / Impuestos
+    if norm in {"iva", "impuestos", "impuesto", "f29", "formulario 29", "mi iva", "balance tributario", "cuanto iva debo", "cuánto iva debo", "cuanto debo de iva", "cuánto debo de iva"}:
+        if user.active_mode != "EMPRESA" or not active_comp:
+            await whatsapp.send_text(
+                phone,
+                "[!] Para consultar tu liquidación de impuestos F29 debes estar en Modo Empresa.\n\n"
+                "▸ Escribe `modo [nombre de tu empresa]` (ej: `modo tecnospa`).\n"
+                "O escribe `mis empresas` para ver tus empresas registradas."
+            )
+        else:
+            await touch_company_action(db, user)
+            tax_summary = await get_monthly_tax_summary(db, active_comp)
+            await whatsapp.send_text(phone, format_tax_summary(tax_summary))
+        return True
+
+    # Comandos de lista de compras / gastos
+    expense_list_triggers = (
+        "cuales son mis compras", "cuáles son mis compras", "mis compras",
+        "muestra los gastos", "muestra mis gastos", "mostrar gastos",
+        "en que gaste", "en qué gasté", "que he comprado", "qué he comprado",
+        "ver compras", "ver gastos", "detalle de gastos", "lista de compras", "compras", "gastos"
+    )
+    if any(norm == trig or norm.startswith(trig + " ") for trig in expense_list_triggers):
+        data = await get_expense_list(db, phone, raw_month=content, profile_name=profile_name)
+        await whatsapp.send_text(phone, format_expense_list(data))
+        return True
+
+    # Comandos de saldo / resumen
+    if norm in {"saldo", "cuanto me queda", "cuánto me queda", "cuanto tengo", "cuánto tengo", "resumen", "balance", "estado", "cuanto he gastado", "cuánto he gastado"}:
+        summary = await get_monthly_summary(db, phone, profile_name)
+        await whatsapp.send_text(phone, format_summary(summary))
+        return True
+
+    # Comandos de diagnóstico financiero y consejos de ahorro
+    analytics_triggers = (
+        "ahorro", "como ahorrar", "cómo ahorrar", "consejos", "consejo",
+        "tips", "tips de ahorro", "analisis", "análisis", "en que gasto mas",
+        "en qué gasto más", "donde gasto mas", "dónde gasto más", "diagnostico", "diagnóstico"
+    )
+    if any(norm == trig or norm.startswith(trig + " ") for trig in analytics_triggers):
+        analysis = await get_spending_analysis(db, phone, profile_name=profile_name)
+        await whatsapp.send_text(phone, format_spending_analysis(analysis))
+        return True
+
+    # Deshacer o borrar el último gasto
+    undo_triggers = (
+        "deshacer", "eliminar gasto", "borrar gasto", "eliminar ultimo gasto",
+        "eliminar último gasto", "borrar ultimo gasto", "borrar último gasto",
+        "cancelar gasto", "anular gasto"
+    )
+    if norm in undo_triggers:
+        success, msg = await delete_last_expense(db, phone)
+        await whatsapp.send_text(phone, msg)
+        return True
+
+    # Reparar saldo y limpiar gastos erróneos de comandos
+    repair_triggers = (
+        "reparar saldo", "reparar mi saldo", "arreglar saldo", "arreglar mi saldo",
+        "limpiar saldo", "limpiar errores", "limpiar gastos erroneos", "limpiar gastos erróneos",
+        "limpiar gastos falsos", "reparar cuenta",
+    )
+    if norm in repair_triggers:
+        _, _, msg = await purge_bogus_expenses(db, phone)
+        await whatsapp.send_text(phone, msg)
+        return True
+
+    return False
+
+
+async def _process_extraction_result(
+    db: AsyncSession,
+    phone: str,
+    extraction: ExtractionResult,
+    user: User,
+    active_comp: Company | None,
+    input_type: str,
+    content: str | bytes,
+    profile_name: str | None,
+    is_new_user: bool,
+    is_in_trial: bool,
+) -> dict[str, str]:
+    if extraction.is_company_creation:
+        if not extraction.company_rut:
+            reply = (
+                f"⚠️ Por favor indica el RUT para registrar o corregir la empresa *{extraction.company_name}*.\n\n"
+                f"▸ Formato: `crear empresa {extraction.company_name} rut [RUT] remanente [Monto] presupuesto [Monto]`\n"
+                f"• Ejemplo: `crear empresa {extraction.company_name} rut 8.670.330-0 remanente 100000 presupuesto 750000`"
+            )
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        comp_obj, is_new, comp_budget = await create_company(
+            db=db,
+            user=user,
+            name=extraction.company_name,
+            rut=extraction.company_rut,
+            initial_tax_credit=extraction.initial_credit or 0.0,
+            is_exempt_issuer=extraction.company_is_exempt or False,
+            initial_budget=extraction.budget_amount or 0.0,
+        )
+        action_label = "creada y activada" if is_new else "actualizada y activada"
+        exempt_badge = " _(Emisor Exento DTE 34)_" if comp_obj.is_exempt_issuer else ""
+        reply = (
+            f"✓ *Empresa {action_label} con éxito*{exempt_badge}\n"
+            f"──────────────────────────\n"
+            f"▪ Nombre: *{comp_obj.name}*\n"
+            f"▪ RUT: `{comp_obj.rut}`\n"
+            f"▪ Emisión DTE: {'Exenta (DTE 34: 0% Débito IVA)' if comp_obj.is_exempt_issuer else 'Afecta (DTE 33: 19% Débito IVA)'}\n"
+            f"▪ Presupuesto asignado: *{format_currency(comp_budget.total_budget)}*\n"
+            f"▪ Remanente asignado: *{format_currency(comp_obj.initial_tax_credit)}*\n"
+            f"▪ Modo Activo: *Modo Empresa ({comp_obj.name})* 🏢\n"
+            f"──────────────────────────\n"
+            f"▸ *¿Ingresaste algún dato erróneo?*\n"
+            f"Si necesitas modificar alguno de estos valores, puedes corregirlo ahora mismo escribiendo:\n"
+            f"• `corregir rut [nuevo rut]` (ej: `corregir rut 8.670.330-0`)\n"
+            f"• `corregir remanente [monto]` (ej: `corregir remanente 150000`)\n"
+            f"• `corregir presupuesto [monto]` (ej: `corregir presupuesto 500000`)\n\n"
+            f"• Para volver a gastos personales: `modo personal`"
+        )
+        await whatsapp.send_text(phone, reply)
+        return {"status": "processed"}
+
+    if extraction.set_company_remanente is not None:
+        target_comp = None
+        if extraction.target_company_name:
+            target_comp = await get_company_by_name(db, user.id, extraction.target_company_name)
+            if not target_comp:
+                reply = f"[!] No encontré ninguna empresa llamada *'{extraction.target_company_name}'*. Escribe `mis empresas` para ver la lista."
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+        elif user.active_mode == "EMPRESA" and active_comp:
+            target_comp = active_comp
+        else:
+            user_companies = await list_user_companies(db, user.id)
+            if len(user_companies) == 1:
+                target_comp = user_companies[0]
+            elif len(user_companies) > 1:
+                reply = (
+                    "[!] Tienes más de una empresa registrada. Por favor indica cuál deseas actualizar:\n"
+                    "▸ `corregir remanente empresa [Nombre] [Monto]`\n"
+                    "O activa tu empresa primero con `modo [Nombre]`."
+                )
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+            else:
+                reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+
+        await touch_company_action(db, user)
+        target_comp = await update_company_remanente(db, target_comp, extraction.set_company_remanente)
+        reply = (
+            f"✓ *Remanente de IVA actualizado* 🐶🐾\n"
+            f"──────────────────────────\n"
+            f"▪ Empresa: *{target_comp.name}*\n"
+            f"▪ Nuevo remanente asignado: *{format_currency(target_comp.initial_tax_credit)}*\n"
+            f"──────────────────────────\n"
+            f"▸ Este crédito fiscal a favor se imputará automáticamente en tu balance F29 de este mes."
+        )
+        await whatsapp.send_text(phone, reply)
+        return {"status": "processed"}
+
+    if extraction.set_company_rut is not None:
+        target_comp = None
+        if extraction.target_company_name:
+            target_comp = await get_company_by_name(db, user.id, extraction.target_company_name)
+            if not target_comp:
+                reply = f"[!] No encontré ninguna empresa llamada *'{extraction.target_company_name}'*. Escribe `mis empresas` para ver la lista."
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+        elif user.active_mode == "EMPRESA" and active_comp:
+            target_comp = active_comp
+        else:
+            user_companies = await list_user_companies(db, user.id)
+            if len(user_companies) == 1:
+                target_comp = user_companies[0]
+            elif len(user_companies) > 1:
+                reply = (
+                    "[!] Tienes más de una empresa registrada. Por favor indica cuál deseas actualizar:\n"
+                    "▸ `corregir rut empresa [Nombre] [Nuevo_RUT]`\n"
+                    "O activa tu empresa primero con `modo [Nombre]`."
+                )
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+            else:
+                reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+
+        await touch_company_action(db, user)
+        target_comp = await update_company_rut(db, target_comp, extraction.set_company_rut)
+        reply = (
+            f"✓ *RUT de empresa actualizado* 🐶🐾\n"
+            f"──────────────────────────\n"
+            f"▪ Empresa: *{target_comp.name}*\n"
+            f"▪ Nuevo RUT asignado: `{target_comp.rut}`\n"
+            f"──────────────────────────\n"
+            f"▸ A partir de ahora todos los documentos tributarios y balances se asociarán a este RUT."
+        )
+        await whatsapp.send_text(phone, reply)
+        return {"status": "processed"}
+
+    if extraction.set_company_exempt is not None:
+        if user.active_mode != "EMPRESA" or not active_comp:
+            reply = "[!] Debes activar una empresa antes de configurar si es exenta. Escribe `modo [nombre de tu empresa]`."
+        else:
+            await touch_company_action(db, user)
+            active_comp = await set_company_exempt_status(db, active_comp, extraction.set_company_exempt)
+            status_txt = "EMISOR EXENTO (DTE 34: 0% IVA Débito)" if active_comp.is_exempt_issuer else "EMISOR AFECTO (DTE 33: 19% IVA Débito)"
+            reply = (
+                f"✓ Configuración actualizada para *{active_comp.name}*.\n"
+                f"▪ Estado: *{status_txt}*.\n"
+                f"▪ A partir de ahora, sus facturas emitidas por defecto serán {'exentas de IVA' if active_comp.is_exempt_issuer else 'con 19% de IVA'}."
+            )
+        await whatsapp.send_text(phone, reply)
+        return {"status": "processed"}
+
+    if extraction.is_budget_transfer and extraction.transfer_amount:
+        success, receipt_msg, _ = await transfer_company_budget_to_personal(
+            db=db,
+            user=user,
+            amount=extraction.transfer_amount,
+            target_company_name=extraction.target_company_name,
+        )
+        if user.active_mode == "EMPRESA":
+            await touch_company_action(db, user)
+        await whatsapp.send_text(phone, receipt_msg)
+        return {"status": "processed"}
+
+    if extraction.target_mode:
+        switch_msg, _ = await switch_mode(db, user, extraction.target_mode, extraction.target_company_name)
+        await whatsapp.send_text(phone, switch_msg)
+        return {"status": "processed"}
+
+    if extraction.is_companies_list_inquiry:
+        companies = await list_user_companies(db, user.id)
+        if not companies:
+            reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
+        else:
+            lines = ["■ *TUS EMPRESAS*", "──────────────────────────"]
+            for c in companies:
+                ex_badge = " _[Exenta]_" if getattr(c, "is_exempt_issuer", False) else ""
+                lines.append(f"• *{c.name}*{ex_badge} (RUT: `{c.rut}`) -> `modo {c.name.lower()}`")
+            reply = "\n".join(lines)
+        await whatsapp.send_text(phone, reply)
+        return {"status": "processed"}
+
+    if extraction.is_tax_inquiry:
+        if user.active_mode != "EMPRESA" or not active_comp:
+            reply = "[!] Para consultar impuestos F29 debes activar tu empresa. Escribe `modo [nombre de tu empresa]`."
+        else:
+            await touch_company_action(db, user)
+            tax_summary = await get_monthly_tax_summary(db, active_comp)
+            reply = format_tax_summary(tax_summary)
+        await whatsapp.send_text(phone, reply)
+        return {"status": "processed"}
+
+    if input_type == "image":
+        extraction.is_expense_list_inquiry = False
+        extraction.is_balance_inquiry = False
+        extraction.is_budget_setup = False
+
+    if extraction.total_spent > 0 or extraction.items:
+        extraction.is_expense_list_inquiry = False
+        extraction.is_balance_inquiry = False
+
+    if extraction.is_balance_inquiry:
+        summary = await get_monthly_summary(db, phone, profile_name)
+        reply = format_summary(summary)
+        await whatsapp.send_text(phone, reply)
+        return {"status": "processed"}
+
+    if extraction.is_expense_list_inquiry:
+        month_param = extraction.target_month or (content if isinstance(content, str) else None)
+        data = await get_expense_list(db, phone, raw_month=month_param, profile_name=profile_name)
+        reply = format_expense_list(data)
+        await whatsapp.send_text(phone, reply)
+        return {"status": "processed"}
+
+    if input_type == "text" and isinstance(content, str):
+        c_lower = content.lower()
+        has_rut = bool(re.search(r"\b[0-9]{1,2}(?:\.[0-9]{3}){2}-[0-9kK]\b|\b[0-9]{7,8}-[0-9kK]\b", c_lower))
+        has_admin_keyword = any(k in c_lower for k in ("empresa", "remanente", "crear empresa", "corrige empresa", "corregir empresa", "presupuesto", "rut"))
+        is_valid_handled = (
+            extraction.is_company_creation
+            or extraction.tax_doc_type is not None
+            or extraction.is_budget_transfer
+            or extraction.is_budget_setup
+            or extraction.set_company_remanente is not None
+            or extraction.set_company_rut is not None
+            or extraction.set_company_exempt is not None
+            or extraction.target_mode is not None
+            or extraction.is_companies_list_inquiry
+            or extraction.is_tax_inquiry
+        )
+        if (has_rut or has_admin_keyword) and not is_valid_handled:
+            help_msg = (
+                "⚠️ *No pude entender la instrucción de empresa o presupuesto.*\n"
+                "──────────────────────────\n"
+                "Para registrar o actualizar tu empresa, usa este formato:\n\n"
+                "▸ `crear empresa [Nombre] rut [RUT] remanente [Monto] presupuesto [Monto]`\n\n"
+                "• *Ejemplo:* `crear empresa PomPomSpA rut 8.670.330-0 remanente 100000 presupuesto 750000`\n"
+                "• *Para corregir solo RUT:* `corrige rut 8.670.330-0`\n"
+                "• *Para corregir solo presupuesto:* `corrige presupuesto 750000`\n"
+                "• *Para corregir solo remanente:* `corrige remanente 100000`\n"
+                "• *Si tienes saldos erróneos:* escribe `reparar saldo` para limpiarlos automáticamente."
+            )
+            await whatsapp.send_text(phone, help_msg)
+            return {"status": "processed"}
+
+    is_in_company_mode = (user.active_mode == "EMPRESA" and active_comp is not None)
+
+    if is_in_company_mode and is_company_timeout_exceeded(user, timeout_seconds=300):
+        item_desc = extraction.items[0].name if extraction.items else "Registro"
+        amt_display = format_currency(extraction.total_spent)
+
+        if extraction.tax_doc_type:
+            pending_payload = {
+                "kind": "tax_doc",
+                "doc_direction": extraction.tax_doc_direction or "RECEIVED",
+                "doc_type": extraction.tax_doc_type,
+                "total_amount": extraction.total_spent,
+                "net_amount": extraction.net_amount,
+                "is_net_amount": extraction.is_net_amount,
+                "counterpart": extraction.counterpart or "",
+                "description": item_desc,
+                "is_exempt": extraction.is_exempt,
+                "raw_input_type": input_type,
+            }
+        else:
+            pending_payload = {
+                "kind": "expense",
+                "extraction": extraction.model_dump(),
+                "raw_input_type": input_type,
+            }
+
+        await save_pending_action(db, user, pending_payload)
+
+        timeout_confirm_msg = (
+            f"⚠️ *Han pasado más de 5 minutos desde tu última acción en {active_comp.name}.*\n\n"
+            f"¿Dónde deseas registrar este movimiento de *{amt_display}* ({item_desc})?\n\n"
+            f"• Responde *1* para *{active_comp.name}* (sigue en Modo Empresa)\n"
+            f"• Responde *2* para *Personal* (cambia a Modo Personal)\n"
+            f"• O escribe *cancelar*"
+        )
+        await whatsapp.send_text(phone, timeout_confirm_msg)
+        return {"status": "processed"}
+
+    if extraction.tax_doc_type in {"FACTURA", "FACTURA_EXENTA", "BOLETA"}:
+        if is_in_company_mode:
+            await touch_company_action(db, user)
+            doc, tax_sum = await record_tax_document(
+                db=db,
+                user=user,
+                company=active_comp,
+                doc_direction=extraction.tax_doc_direction or "RECEIVED",
+                doc_type=extraction.tax_doc_type,
+                total_amount=extraction.total_spent,
+                net_amount=extraction.net_amount,
+                counterpart=extraction.counterpart or "",
+                description=extraction.items[0].name if extraction.items else "",
+                is_exempt=extraction.is_exempt,
+                raw_input_type=input_type,
+            )
+
+            if doc.doc_direction == "EMITTED":
+                if doc.is_exempt or doc.doc_type == "FACTURA_EXENTA":
+                    reply = (
+                        f"✓ *Factura Exenta de Venta emitida ({active_comp.name})*\n"
+                        f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
+                        f"▪ *Débito Fiscal IVA:* $0 (DTE 34: Operación no afecta a IVA)\n"
+                        f"▪ *Abono a Presupuesto Empresa:* `+{format_currency(doc.total_amount)}`\n"
+                        f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}* (Total: {format_currency(tax_sum['budget_total'])})\n"
+                    )
+                else:
+                    reply = (
+                        f"✓ *Factura de Venta emitida ({active_comp.name})*\n"
+                        f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
+                        f"▪ Monto Neto (Ingreso): {format_currency(doc.net_amount)}\n"
+                        f"▪ *Débito Fiscal (+IVA):* `+{format_currency(doc.iva_amount)}` (va a F29)\n"
+                        f"▪ *Abono a Presupuesto Empresa:* `+{format_currency(doc.net_amount)}` (Neto)\n"
+                        f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}* (Total: {format_currency(tax_sum['budget_total'])})\n"
+                    )
+            elif doc.is_exempt or doc.doc_type == "FACTURA_EXENTA":
+                reply = (
+                    f"✓ *Factura Exenta de Compra registrada ({active_comp.name})*\n"
+                    f"▪ Gasto Total: *{format_currency(doc.total_amount)}* (Gasto operacional deducible)\n"
+                    f"▪ *Crédito Fiscal IVA:* $0 (Sin crédito fiscal)\n"
+                    f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
+                )
+            elif doc.doc_type == "FACTURA":
+                reply = (
+                    f"✓ *Factura de Compra registrada ({active_comp.name})*\n"
+                    f"▪ Total Proveedor: {format_currency(doc.total_amount)}\n"
+                    f"▪ Gasto Neto empresa: {format_currency(doc.net_amount)}\n"
+                    f"▪ *Crédito Fiscal IVA recuperado:* `+{format_currency(doc.iva_amount)}`\n"
+                    f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
+                )
+            else:
+                reply = (
+                    f"✓ *Boleta de compra registrada ({active_comp.name})*\n"
+                    f"▪ Gasto Total: *{format_currency(doc.total_amount)}* (Gasto operacional)\n"
+                    f"▪ *Crédito Fiscal IVA:* $0 (Sin crédito fiscal)\n"
+                    f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
+                )
+
+            f29_part = f"🏛️ Saldo F29 actual: {format_currency(tax_sum['iva_a_pagar'])} a pagar." if tax_sum['iva_a_pagar'] > 0 else f"💰 Remanente F29 a favor: {format_currency(tax_sum['remanente_nuevo'])}."
+            reply += f"▪ {f29_part}"
+
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+        else:
+            result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
+            reply = (
+                f"✓ Gasto registrado en *Modo Personal*, {user.name}: {format_currency(extraction.total_spent)}\n"
+                f"▪ Saldo disponible: {format_currency(value)}\n\n"
+                "▸ *Aviso:* Al estar en Modo Personal, este documento no genera crédito fiscal IVA. "
+                "Si pertenecía a tu empresa, escribe `modo [nombre de tu empresa]` y vuelve a registrarlo."
+            )
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+    result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
+
+    if is_in_company_mode:
+        await touch_company_action(db, user)
+
+    if result_type == "budget":
+        reply = DialogueEngine.format_budget_reply(
+            user_name=user.name,
+            total_budget=float(value),
+            remaining=float(value),
+            is_addition=False,
+            is_company=is_in_company_mode,
+            company_name=active_comp.name if active_comp else None,
+        )
+    elif result_type == "budget_added":
+        summary = await get_monthly_summary(db, phone, profile_name)
+        reply = DialogueEngine.format_budget_reply(
+            user_name=user.name,
+            total_budget=float(summary["total_budget"]),
+            remaining=float(summary["remaining"]),
+            is_addition=True,
+            added_amount=float(value),
+            is_company=is_in_company_mode,
+            company_name=active_comp.name if active_comp else None,
+        )
+    elif result_type == "unrecognized":
+        reply = (
+            f"[!] Hola {user.name} 🐾, no detecté un gasto ni consulta clara.\n\n"
+            "▪ *Opciones disponibles:*\n"
+            "• Registrar gasto: `Almuerzo 4500` o `10 lucas bencina`\n"
+            "• Factura venta: `Emití factura por 1.190.000`\n"
+            "• Factura compra: `Factura insumos 238.000`\n"
+            "• Boleta: `Boleta 45.000`\n"
+            "• Liquidación impuestos: `iva` o `f29`\n"
+            "• Cambiar modo: `modo [empresa]` o `modo personal`\n"
+            "• Ver ayuda completa: `ayuda`"
+        )
+    else:
+        item_name = extraction.items[0].name if extraction.items else "Gasto"
+        reply = DialogueEngine.format_expense_reply(
+            user_name=user.name,
+            item_name=item_name,
+            amount=extraction.total_spent,
+            remaining=float(value),
+            is_company=is_in_company_mode,
+            company_name=active_comp.name if active_comp else None,
+        )
+        if is_in_trial:
+            user.trial_expense_count += 1
+            await db.commit()
+            reply += f"\n\n▸ *Uso de prueba:* {user.trial_expense_count}/{settings.free_trial_max_expenses} registros."
+
+    if is_new_user and result_type != "budget":
+        reply = (
+            f"✓ *Bienvenido/a, {user.name}* (ID: `{user.user_code}`)\n\n"
+            + reply
+        )
+
+    print(f"--> [WEBHOOK] Enviando respuesta a {mask_phone(phone)}: {reply}")
+    await whatsapp.send_text(phone, reply)
+    print(f"--> [WEBHOOK] Respuesta enviada con éxito a {mask_phone(phone)}")
+    return {"status": "processed"}
+
+
 @router.post("")
 async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> dict[str, str]:
     payload = await request.json()
@@ -274,12 +1102,10 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         # Deduplicación por WhatsApp Message ID (wamid) para ignorar reintentos de Meta
         msg_id = message.get("id")
         if msg_id:
-            # 1. Chequeo rápido en memoria (evita carreras y reintentos concurrentes en milisegundos)
             if is_duplicate_message_id(msg_id):
                 print(f"--> [WEBHOOK] Mensaje duplicado detectado en memoria ({msg_id}). Ignorando.")
                 return {"status": "duplicate_ignored"}
 
-            # 2. Chequeo persistente en base de datos
             existing_pm = await db.scalar(select(ProcessedMessage).where(ProcessedMessage.message_id == msg_id))
             if existing_pm is not None:
                 print(f"--> [WEBHOOK] Mensaje duplicado detectado en BD ({msg_id}). Ignorando.")
@@ -301,398 +1127,31 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         print(f"--> [WEBHOOK] Procesando mensaje de {user.name} ({user.user_code}) tipo {input_type}")
 
         # 1. Comandos de Administrador / Dueño (si el remitente es admin)
-        if input_type == "text":
+        if input_type == "text" and (is_admin_phone(phone) or user.is_admin):
             raw_text = message.get("text", {}).get("body", "").strip()
-            if is_admin_phone(phone) or user.is_admin:
-                admin_res = await handle_admin_command(db, phone, raw_text)
-                if admin_res:
-                    admin_reply, target_u, target_num = admin_res
-                    if admin_reply == "BROADCAST_CARD":
-                        users_list = await list_active_users(db)
-                        bot_contact_phone = bot_number or phone
-                        sent_count = 0
-                        for u_data in users_list:
-                            u_phone = u_data.get("phone")
-                            if u_phone and u_phone != "Cifrado" and not is_admin_phone(u_phone):
-                                try:
-                                    b_msg = (
-                                        f"¡Hola {u_data.get('name', 'Amigo')}! 🐶🐾\n\n"
-                                        "Me cambié el nombre oficialmente a *Pam Anota* 🐾.\n"
-                                        "Te comparto mi tarjeta de contacto oficial aquí abajo:\n\n"
-                                        "▸ Toca la tarjeta y selecciona *'Actualizar contacto existente'* "
-                                        "(o *'Guardar contacto'*) para que quede guardado con mi nuevo nombre "
-                                        "en tu teléfono con un solo toque."
-                                    )
-                                    await whatsapp.send_text(u_phone, b_msg)
-                                    await whatsapp.send_contact(
-                                        recipient=u_phone,
-                                        phone_number=bot_contact_phone,
-                                        formatted_name="Pam Anota 🐶",
-                                        first_name="Pam",
-                                        last_name="Anota 🐶",
-                                        company="Pam Anota",
-                                    )
-                                    sent_count += 1
-                                except Exception as b_err:
-                                    print(f"--> [ADMIN BROADCAST] Error enviando a {mask_phone(u_phone)}: {b_err}")
-                        await whatsapp.send_text(phone, f"✓ Difusión completada: Tarjeta enviada a {sent_count} usuarios activos.")
-                        return {"status": "processed"}
+            if await _handle_admin_message(db, phone, raw_text, user, bot_number):
+                return {"status": "processed"}
 
-                    print(f"--> [WEBHOOK] Comando admin ejecutado por {mask_phone(phone)}: {admin_reply}")
-                    await whatsapp.send_text(phone, admin_reply)
-
-                    # Si se autorizó exitosamente a un usuario, enviar mensaje de bienvenida directo a su WhatsApp
-                    if target_u and target_num:
-                        try:
-                            client_welcome = (
-                                f"✓ *¡Hola {target_u.name}! Tu acceso a Pam Anota ha sido activado.*\n"
-                                f"▪ ID Usuario: `{target_u.user_code}`\n\n"
-                                "Ya puedes comenzar a usar el servicio:\n"
-                                "• *Configura tu presupuesto:* `Presupuesto 500000`\n"
-                                "• *Registra un gasto:* `Almuerzo 4500` (o envía audio/foto)\n"
-                                "• *Consulta tu saldo:* `saldo`\n"
-                                "• *Ver ayuda:* `ayuda`"
-                            )
-                            await whatsapp.send_text(target_num, client_welcome)
-                        except Exception as notify_err:
-                            print(f"--> [WEBHOOK] Error al notificar bienvenida al cliente: {notify_err}")
-
-                    return {"status": "processed"}
-
-        # 2. Control de Acceso: Verificar si el usuario está bloqueado
-        if user.status == "BLOCKED":
-            print(f"--> [WEBHOOK] Usuario bloqueado intentó acceder: {mask_phone(phone)}")
-            await whatsapp.send_text(
-                phone,
-                "[!] *Acceso inactivo*\n"
-                "──────────────────────────\n"
-                f"Hola {user.name}, tu cuenta se encuentra suspendida o inactiva.\n"
-                "▪ Para reactivar tu servicio o resolver dudas, por favor comunícate con el administrador."
-            )
+        # 2. Control de Acceso y Período de Prueba
+        can_proceed, is_in_trial = await _handle_access_control(db, phone, user, input_type, message)
+        if not can_proceed:
             return {"status": "processed"}
 
-        # 3. Control de Acceso: Si el usuario NO está activo y NO es admin
-        is_in_trial = False
-        if user.status != "ACTIVE" and not user.is_admin:
-            is_hire_request = False
-            if input_type == "text":
-                text_content = message.get("text", {}).get("body", "").strip()
-                norm_text = text_content.lower().strip().strip("¿?¡!.,")
-                hire_triggers = {
-                    "si", "sí", "quiero", "contratar", "quiero contratar", "me interesa",
-                    "suscribir", "suscribirme", "deseo contratar", "si quiero", "sí quiero",
-                    "comprar", "activar", "plan"
-                }
-                if norm_text in hire_triggers or any(norm_text.startswith(t + " ") for t in ("si", "sí", "quiero", "contratar")):
-                    is_hire_request = True
-
-            # Si el prospecto confirma interés en contratar
-            if is_hire_request:
-                user.status = "PENDING"
-                await db.commit()
-                print(f"--> [WEBHOOK] Prospecto registrado: {user.name} ({mask_phone(phone)})")
-
-                prospect_reply = (
-                    "■ *SOLICITUD RECIBIDA* | Pam Anota\n"
-                    "──────────────────────────\n"
-                    f"✓ ¡Gracias por tu interés, *{user.name}*!\n"
-                    "▪ Hemos registrado tu solicitud de activación.\n"
-                    "▪ Nos comunicaremos contigo a la brevedad para coordinar el pago y activar tu servicio.\n\n"
-                    f"▪ ID Solicitud: `{user.user_code}`"
-                )
-                await whatsapp.send_text(phone, prospect_reply)
-
-                # Notificación automática al Dueño / Administrador
-                if settings.admin_phone:
-                    clean_adm = settings.admin_phone.strip().lstrip("+")
-                    admin_lead_msg = (
-                        "■ *NUEVO CLIENTE INTERESADO*\n"
-                        "──────────────────────────\n"
-                        f"▪ Nombre: *{user.name}*\n"
-                        f"▪ Teléfono: `{phone}`\n"
-                        f"▪ ID Código: `{user.user_code}`\n\n"
-                        "▸ Para activar su acceso tras recibir el pago, responde:\n"
-                        f"`autorizar {phone}`"
-                    )
-                    try:
-                        await whatsapp.send_text(clean_adm, admin_lead_msg)
-                    except Exception as adm_err:
-                        print(f"--> [WEBHOOK] Error al notificar al admin sobre prospecto: {adm_err}")
-
-                return {"status": "processed"}
-
-            # Modelo C: Verificar período de prueba gratuita si está activado
-            if settings.allow_free_trial:
-                if user.trial_expense_count >= settings.free_trial_max_expenses:
-                    trial_ended_msg = (
-                        f"[!] *Período de prueba finalizado*, {user.name}.\n"
-                        "──────────────────────────\n"
-                        f"Has alcanzado el límite de {settings.free_trial_max_expenses} registros de prueba gratuita.\n\n"
-                        "▸ Para continuar utilizando Pam Anota de forma ilimitada, responde *SI* para contratar tu plan mensual."
-                    )
-                    await whatsapp.send_text(phone, trial_ended_msg)
-                    return {"status": "processed"}
-                else:
-                    is_in_trial = True
-
-            if not is_in_trial:
-                pitch_msg = (
-                    "■ *PAM ANOTA* | Control de Gastos Inteligente\n"
-                    "──────────────────────────\n"
-                    f"Hola *{user.name}*, este es un servicio privado de gestión financiera personal y tributaria para empresas vía WhatsApp.\n\n"
-                    "▪ *Características principales:*\n"
-                    "• Control dual: Gastos personales y Presupuesto Empresa\n"
-                    "• Registro de Facturas (débito/crédito IVA) y Boletas operacionales\n"
-                    "• Liquidación mensual estimada de impuestos F29 y PPM\n"
-                    "• Registro inmediato por texto, nota de voz o foto de boleta/factura\n"
-                    "• Privacidad y datos cifrados\n\n"
-                    "▸ *¿Deseas contratar el servicio?*\n"
-                    "Responde *SI* para coordinar tu activación."
-                )
-                await whatsapp.send_text(phone, pitch_msg)
-                return {"status": "processed"}
-
-        # 4. Manejo de Confirmación por Timeout de 5 Minutos (si hay acción pendiente retenida)
+        # 3. Manejo de Confirmación por Timeout de 5 Minutos (si hay acción retenida)
         if user.pending_action_data and input_type == "text":
-            raw_text = message.get("text", {}).get("body", "").strip()
-            norm_confirm = raw_text.lower().strip().strip("¿?¡!.,")
-            active_comp = await get_active_company(db, user)
-            comp_norm = active_comp.name_normalized if active_comp else ""
-
-            # Cancelar acción
-            if norm_confirm in {"cancelar", "anular", "cancel", "no"}:
-                await get_and_clear_pending_action(db, user)
-                await whatsapp.send_text(phone, "✓ Registro cancelado.")
+            if await _handle_timeout_confirmation(db, phone, message, user, profile_name):
                 return {"status": "processed"}
 
-            # Opción 1: Empresa activa
-            if norm_confirm in {"1", "empresa", "si", "sí", "confirmar"} or (comp_norm and norm_confirm == comp_norm):
-                pending = await get_and_clear_pending_action(db, user)
-                if pending and active_comp:
-                    await touch_company_action(db, user)
-                    if pending.get("kind") == "tax_doc":
-                        doc, summary = await record_tax_document(
-                            db=db,
-                            user=user,
-                            company=active_comp,
-                            doc_direction=pending.get("doc_direction", "RECEIVED"),
-                            doc_type=pending.get("doc_type", "FACTURA"),
-                            total_amount=pending.get("total_amount", 0),
-                            net_amount=pending.get("net_amount"),
-                            counterpart=pending.get("counterpart", ""),
-                            description=pending.get("description", ""),
-                            is_exempt=pending.get("is_exempt", False),
-                            raw_input_type=pending.get("raw_input_type", "text"),
-                        )
-                        if doc.doc_direction == "EMITTED":
-                            abono_val = doc.net_amount if not doc.is_exempt else doc.total_amount
-                            reply = (
-                                f"✓ *{doc.doc_type.capitalize()} de venta emitida en {active_comp.name}*\n"
-                                f"▪ Total Facturado: {format_currency(doc.total_amount)}\n"
-                                f"▪ Abono al Presupuesto Empresa (Neto): +{format_currency(abono_val)}\n"
-                                f"▪ Presupuesto empresa disponible: {format_currency(summary['budget_remaining'])}\n"
-                                f"▪ {f29_str}"
-                            )
-                        else:
-                            reply = (
-                                f"✓ *{doc.doc_type.capitalize()} registrada en {active_comp.name}*\n"
-                                f"▪ Monto Total: {format_currency(doc.total_amount)}\n"
-                                f"▪ Presupuesto empresa disponible: {format_currency(summary['budget_remaining'])}\n"
-                                f"▪ {f29_str}"
-                            )
-                    else:
-                        ext_dict = pending.get("extraction", {})
-                        ext_obj = ExtractionResult.model_validate(ext_dict)
-                        _, val, _ = await record_extraction(db, phone, pending.get("raw_input_type", "text"), ext_obj, profile_name)
-                        reply = f"✓ Gasto registrado en *{active_comp.name}*: {format_currency(ext_obj.total_spent)}\n▪ Presupuesto empresa disponible: {format_currency(val)}"
-
-                    await whatsapp.send_text(phone, reply)
-                    return {"status": "processed"}
-
-            # Opción 2: Cuenta Personal (vuelve a Modo Personal)
-            if norm_confirm in {
-                "2", "personal", "gasto personal", "gastos personales", "es personal",
-                "cuenta personal", "mi cuenta", "hogar", "casa", "modo personal",
-            } or any(norm_confirm.startswith(p) for p in ("gasto personal", "es personal", "cuenta personal")):
-                pending = await get_and_clear_pending_action(db, user)
-                if pending:
-                    # Cambiar permanentemente a Modo Personal como solicitó el usuario
-                    user.active_mode = "PERSONAL"
-                    user.active_company_id = None
-                    await db.commit()
-
-                    if pending.get("kind") == "tax_doc":
-                        tot = pending.get("total_amount", 0)
-                        ext_personal = ExtractionResult(total_spent=tot)
-                    else:
-                        ext_personal = ExtractionResult.model_validate(pending.get("extraction", {}))
-
-                    _, val, _ = await record_extraction(db, phone, pending.get("raw_input_type", "text"), ext_personal, profile_name)
-
-                    reply = (
-                        f"✓ *Gasto registrado en tu cuenta Personal*: {format_currency(ext_personal.total_spent)}\n"
-                        f"▪ Saldo disponible personal: {format_currency(val)}\n"
-                        "──────────────────────────\n"
-                        "▪ *Modo Activo:* Has vuelto a *Modo Personal* 🏠.\n"
-                        "A partir de ahora, todos los gastos que registres serán grabados en tus *gastos personales del hogar* (no afectarán a la empresa ni al cálculo del F29).\n\n"
-                        f"▸ Para volver a tu empresa cuando lo desees, escribe `modo {comp_norm or 'empresa'}`."
-                    )
-                    await whatsapp.send_text(phone, reply)
-                    return {"status": "processed"}
-
-        # 5. Atajos directos de texto (sin llamar a Gemini: respuesta instantánea en < 2 ms)
+        # 4. Atajos directos de texto (sin llamar a Gemini: respuesta instantánea en < 2 ms)
         active_comp = await get_active_company(db, user)
-        comp_name = active_comp.name if active_comp else None
 
         if input_type == "text":
             content = message.get("text", {}).get("body", "").strip()
             mime_type = None
             print(f"--> [WEBHOOK] Texto de {user.name}: {content}")
-            norm = content.lower().strip().strip("¿?¡!.,")
-
-            # Cambio de nombre del usuario
-            for prefix in ("me llamo ", "mi nombre es ", "llamame ", "llámame ", "cambiar nombre a "):
-                if norm.startswith(prefix):
-                    new_name_input = content[len(prefix) :].strip()
-                    if new_name_input:
-                        user, updated_name = await update_user_name(db, phone, new_name_input)
-                        confirm_msg = (
-                            f"✓ Nombre actualizado: *{updated_name}*\n"
-                            f"▪ ID Usuario: `{user.user_code}`"
-                        )
-                        await whatsapp.send_text(phone, confirm_msg)
-                        return {"status": "processed"}
-
-            # Comandos de ayuda explícita
-            if norm in {"ayuda", "help", "menu", "menú", "inicio", "start", "como funciona", "cómo funciona", "comandos"}:
-                print(f"--> [WEBHOOK] Enviando mensaje de ayuda a {user.name}")
-                await whatsapp.send_text(phone, get_help_message(user.name, user.user_code, user.active_mode, comp_name))
-                return {"status": "processed"}
-
-            # Saludos, agradecimientos y personalidad conversacional Pam Anota (0 tokens IA)
-            chitchat_reply = DialogueEngine.try_respond_chitchat(content, user.name)
-            if chitchat_reply:
-                await whatsapp.send_text(phone, chitchat_reply)
-                return {"status": "processed"}
-
-            # Tarjeta de contacto interactiva para actualizar / guardar el contacto como Pam Anota
-            contact_triggers = (
-                "contacto", "tarjeta", "tarjeta de contacto", "actualizar contacto",
-                "guardar contacto", "mi contacto", "como te guardo", "cómo te guardo",
-                "tu contacto", "tu numero", "tu número", "guardar numero", "guardar número"
-            )
-            if any(norm == ct or norm.startswith(ct + " ") for ct in contact_triggers):
-                bot_contact_phone = bot_number or phone
-                intro_card_msg = (
-                    "¡Aquí tienes mi tarjeta de contacto oficial! 🐶🐾\n\n"
-                    "▸ Presiona la tarjeta que aparece abajo y selecciona *'Actualizar contacto existente'* "
-                    "(o *'Guardar contacto'*) para que mi nombre quede actualizado automáticamente como "
-                    "*Pam Anota 🐶* en tu teléfono con un solo toque."
-                )
-                await whatsapp.send_text(phone, intro_card_msg)
-                await whatsapp.send_contact(
-                    recipient=phone,
-                    phone_number=bot_contact_phone,
-                    formatted_name="Pam Anota 🐶",
-                    first_name="Pam",
-                    last_name="Anota 🐶",
-                    company="Pam Anota",
-                )
-                return {"status": "processed"}
-
-            # Listado de empresas
-            if norm in {"mis empresas", "ver empresas", "empresas", "lista empresas", "mis companias", "mis compañías"}:
-                companies = await list_user_companies(db, user.id)
-                if not companies:
-                    msg = (
-                        "■ *TUS EMPRESAS*\n"
-                        "──────────────────────────\n"
-                        "No tienes ninguna empresa registrada aún.\n\n"
-                        "▸ Para registrar tu primera empresa, escribe:\n"
-                        "`crear empresa [Nombre] rut [RUT] remanente [Monto]`\n\n"
-                        "Ej: `crear empresa TecnoSpA rut 76.123.456-7 remanente 80000`"
-                    )
-                else:
-                    lines = ["■ *TUS EMPRESAS REGISTRADAS*", "──────────────────────────"]
-                    for c in companies:
-                        active_mark = " ✓ *(Activa)*" if (user.active_mode == "EMPRESA" and user.active_company_id == c.id) else ""
-                        lines.append(f"• *{c.name}*{active_mark}")
-                        lines.append(f"  RUT: `{c.rut}` | Remanente IVA: {format_currency(c.initial_tax_credit)}")
-                        lines.append(f"  ▸ Para activar escribe: `modo {c.name.lower()}`")
-                    lines.append("──────────────────────────")
-                    lines.append("• Para volver a gastos del hogar: `modo personal`")
-                    msg = "\n".join(lines)
-
-                await whatsapp.send_text(phone, msg)
-                return {"status": "processed"}
-
-            # Liquidación F29 / Impuestos
-            if norm in {"iva", "impuestos", "impuesto", "f29", "formulario 29", "mi iva", "balance tributario", "cuanto iva debo", "cuánto iva debo", "cuanto debo de iva", "cuánto debo de iva"}:
-                if user.active_mode != "EMPRESA" or not active_comp:
-                    await whatsapp.send_text(
-                        phone,
-                        "[!] Para consultar tu liquidación de impuestos F29 debes estar en Modo Empresa.\n\n"
-                        "▸ Escribe `modo [nombre de tu empresa]` (ej: `modo tecnospa`).\n"
-                        "O escribe `mis empresas` para ver tus empresas registradas."
-                    )
-                else:
-                    await touch_company_action(db, user)
-                    tax_summary = await get_monthly_tax_summary(db, active_comp)
-                    await whatsapp.send_text(phone, format_tax_summary(tax_summary))
-                return {"status": "processed"}
-
-            # Comandos de lista de compras / gastos
-            expense_list_triggers = (
-                "cuales son mis compras", "cuáles son mis compras", "mis compras",
-                "muestra los gastos", "muestra mis gastos", "mostrar gastos",
-                "en que gaste", "en qué gasté", "que he comprado", "qué he comprado",
-                "ver compras", "ver gastos", "detalle de gastos", "lista de compras", "compras", "gastos"
-            )
-            if any(norm == trig or norm.startswith(trig + " ") for trig in expense_list_triggers):
-                data = await get_expense_list(db, phone, raw_month=content, profile_name=profile_name)
-                await whatsapp.send_text(phone, format_expense_list(data))
-                return {"status": "processed"}
-
-            # Comandos de saldo / resumen
-            if norm in {"saldo", "cuanto me queda", "cuánto me queda", "cuanto tengo", "cuánto tengo", "resumen", "balance", "estado", "cuanto he gastado", "cuánto he gastado"}:
-                summary = await get_monthly_summary(db, phone, profile_name)
-                await whatsapp.send_text(phone, format_summary(summary))
-                return {"status": "processed"}
-
-            # Comandos de diagnóstico financiero y consejos de ahorro
-            analytics_triggers = (
-                "ahorro", "como ahorrar", "cómo ahorrar", "consejos", "consejo",
-                "tips", "tips de ahorro", "analisis", "análisis", "en que gasto mas",
-                "en qué gasto más", "donde gasto mas", "dónde gasto más", "diagnostico", "diagnóstico"
-            )
-            if any(norm == trig or norm.startswith(trig + " ") for trig in analytics_triggers):
-                analysis = await get_spending_analysis(db, phone, profile_name=profile_name)
-                await whatsapp.send_text(phone, format_spending_analysis(analysis))
-                return {"status": "processed"}
-
-            # Deshacer o borrar el último gasto
-            undo_triggers = (
-                "deshacer", "eliminar gasto", "borrar gasto", "eliminar ultimo gasto",
-                "eliminar último gasto", "borrar ultimo gasto", "borrar último gasto",
-                "cancelar gasto", "anular gasto"
-            )
-            if norm in undo_triggers:
-                success, msg = await delete_last_expense(db, phone)
-                await whatsapp.send_text(phone, msg)
-                return {"status": "processed"}
-
-            # Reparar saldo y limpiar gastos erróneos de comandos
-            repair_triggers = (
-                "reparar saldo", "reparar mi saldo", "arreglar saldo", "arreglar mi saldo",
-                "limpiar saldo", "limpiar errores", "limpiar gastos erroneos", "limpiar gastos erróneos",
-                "limpiar gastos falsos", "reparar cuenta",
-            )
-            if norm in repair_triggers:
-                _, _, msg = await purge_bogus_expenses(db, phone)
-                await whatsapp.send_text(phone, msg)
+            if await _handle_pre_extraction_text(db, phone, content, user, bot_number, profile_name, active_comp):
                 return {"status": "processed"}
         elif input_type in {"audio", "image"}:
-
             media_id = message.get(input_type, {}).get("id")
             if not media_id:
                 return {"status": "ignored"}
@@ -701,434 +1160,23 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             print(f"--> [WEBHOOK] Tipo no soportado: {input_type}")
             return {"status": "ignored"}
 
-        # 6. Extracción (Base de conocimiento local de 0 tokens prioritaria + motor ML local + fallback Gemini/Groq)
+        # 5. Extracción (Base de conocimiento local de 0 tokens prioritaria + motor ML local + fallback Gemini/Groq)
         extraction = await extractor.extract(input_type, content, mime_type, db=db)
         print(f"--> [WEBHOOK] Extracción: {extraction}")
 
-        # Si el usuario solicitó crear o modificar una empresa
-        if extraction.is_company_creation:
-            if not extraction.company_rut:
-                reply = (
-                    f"⚠️ Por favor indica el RUT para registrar o corregir la empresa *{extraction.company_name}*.\n\n"
-                    f"▸ Formato: `crear empresa {extraction.company_name} rut [RUT] remanente [Monto] presupuesto [Monto]`\n"
-                    f"• Ejemplo: `crear empresa {extraction.company_name} rut 8.670.330-0 remanente 100000 presupuesto 750000`"
-                )
-                await whatsapp.send_text(phone, reply)
-                return {"status": "processed"}
+        return await _process_extraction_result(
+            db=db,
+            phone=phone,
+            extraction=extraction,
+            user=user,
+            active_comp=active_comp,
+            input_type=input_type,
+            content=content,
+            profile_name=profile_name,
+            is_new_user=is_new_user,
+            is_in_trial=is_in_trial,
+        )
 
-            comp_obj, is_new, comp_budget = await create_company(
-                db=db,
-                user=user,
-                name=extraction.company_name,
-                rut=extraction.company_rut,
-                initial_tax_credit=extraction.initial_credit or 0.0,
-                is_exempt_issuer=extraction.company_is_exempt or False,
-                initial_budget=extraction.budget_amount or 0.0,
-            )
-            action_label = "creada y activada" if is_new else "actualizada y activada"
-            exempt_badge = " _(Emisor Exento DTE 34)_" if comp_obj.is_exempt_issuer else ""
-            reply = (
-                f"✓ *Empresa {action_label} con éxito*{exempt_badge}\n"
-                f"──────────────────────────\n"
-                f"▪ Nombre: *{comp_obj.name}*\n"
-                f"▪ RUT: `{comp_obj.rut}`\n"
-                f"▪ Emisión DTE: {'Exenta (DTE 34: 0% Débito IVA)' if comp_obj.is_exempt_issuer else 'Afecta (DTE 33: 19% Débito IVA)'}\n"
-                f"▪ Presupuesto asignado: *{format_currency(comp_budget.total_budget)}*\n"
-                f"▪ Remanente asignado: *{format_currency(comp_obj.initial_tax_credit)}*\n"
-                f"▪ Modo Activo: *Modo Empresa ({comp_obj.name})* 🏢\n"
-                f"──────────────────────────\n"
-                f"▸ *¿Ingresaste algún dato erróneo?*\n"
-                f"Si necesitas modificar alguno de estos valores, puedes corregirlo ahora mismo escribiendo:\n"
-                f"• `corregir rut [nuevo rut]` (ej: `corregir rut 8.670.330-0`)\n"
-                f"• `corregir remanente [monto]` (ej: `corregir remanente 150000`)\n"
-                f"• `corregir presupuesto [monto]` (ej: `corregir presupuesto 500000`)\n\n"
-                f"• Para volver a gastos personales: `modo personal`"
-            )
-            await whatsapp.send_text(phone, reply)
-            return {"status": "processed"}
-
-
-        # Si el usuario solicitó corregir o actualizar el remanente de su empresa
-        if extraction.set_company_remanente is not None:
-            target_comp = None
-            if extraction.target_company_name:
-                target_comp = await get_company_by_name(db, user.id, extraction.target_company_name)
-                if not target_comp:
-                    reply = f"[!] No encontré ninguna empresa llamada *'{extraction.target_company_name}'*. Escribe `mis empresas` para ver la lista."
-                    await whatsapp.send_text(phone, reply)
-                    return {"status": "processed"}
-            elif user.active_mode == "EMPRESA" and active_comp:
-                target_comp = active_comp
-            else:
-                user_companies = await list_user_companies(db, user.id)
-                if len(user_companies) == 1:
-                    target_comp = user_companies[0]
-                elif len(user_companies) > 1:
-                    reply = (
-                        "[!] Tienes más de una empresa registrada. Por favor indica cuál deseas actualizar:\n"
-                        "▸ `corregir remanente empresa [Nombre] [Monto]`\n"
-                        "O activa tu empresa primero con `modo [Nombre]`."
-                    )
-                    await whatsapp.send_text(phone, reply)
-                    return {"status": "processed"}
-                else:
-                    reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
-                    await whatsapp.send_text(phone, reply)
-                    return {"status": "processed"}
-
-            await touch_company_action(db, user)
-            target_comp = await update_company_remanente(db, target_comp, extraction.set_company_remanente)
-            reply = (
-                f"✓ *Remanente de IVA actualizado* 🐶🐾\n"
-                f"──────────────────────────\n"
-                f"▪ Empresa: *{target_comp.name}*\n"
-                f"▪ Nuevo remanente asignado: *{format_currency(target_comp.initial_tax_credit)}*\n"
-                f"──────────────────────────\n"
-                f"▸ Este crédito fiscal a favor se imputará automáticamente en tu balance F29 de este mes."
-            )
-            await whatsapp.send_text(phone, reply)
-            return {"status": "processed"}
-
-        # Si el usuario solicitó corregir o actualizar el RUT de su empresa
-        if extraction.set_company_rut is not None:
-            target_comp = None
-            if extraction.target_company_name:
-                target_comp = await get_company_by_name(db, user.id, extraction.target_company_name)
-                if not target_comp:
-                    reply = f"[!] No encontré ninguna empresa llamada *'{extraction.target_company_name}'*. Escribe `mis empresas` para ver la lista."
-                    await whatsapp.send_text(phone, reply)
-                    return {"status": "processed"}
-            elif user.active_mode == "EMPRESA" and active_comp:
-                target_comp = active_comp
-            else:
-                user_companies = await list_user_companies(db, user.id)
-                if len(user_companies) == 1:
-                    target_comp = user_companies[0]
-                elif len(user_companies) > 1:
-                    reply = (
-                        "[!] Tienes más de una empresa registrada. Por favor indica cuál deseas actualizar:\n"
-                        "▸ `corregir rut empresa [Nombre] [Nuevo_RUT]`\n"
-                        "O activa tu empresa primero con `modo [Nombre]`."
-                    )
-                    await whatsapp.send_text(phone, reply)
-                    return {"status": "processed"}
-                else:
-                    reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
-                    await whatsapp.send_text(phone, reply)
-                    return {"status": "processed"}
-
-            await touch_company_action(db, user)
-            target_comp = await update_company_rut(db, target_comp, extraction.set_company_rut)
-            reply = (
-                f"✓ *RUT de empresa actualizado* 🐶🐾\n"
-                f"──────────────────────────\n"
-                f"▪ Empresa: *{target_comp.name}*\n"
-                f"▪ Nuevo RUT asignado: `{target_comp.rut}`\n"
-                f"──────────────────────────\n"
-                f"▸ A partir de ahora todos los documentos tributarios y balances se asociarán a este RUT."
-            )
-            await whatsapp.send_text(phone, reply)
-            return {"status": "processed"}
-
-        # Si el usuario configuró el estado de emisor exento para su empresa
-        if extraction.set_company_exempt is not None:
-            if user.active_mode != "EMPRESA" or not active_comp:
-                reply = "[!] Debes activar una empresa antes de configurar si es exenta. Escribe `modo [nombre de tu empresa]`."
-            else:
-                await touch_company_action(db, user)
-                active_comp = await set_company_exempt_status(db, active_comp, extraction.set_company_exempt)
-                status_txt = "EMISOR EXENTO (DTE 34: 0% IVA Débito)" if active_comp.is_exempt_issuer else "EMISOR AFECTO (DTE 33: 19% IVA Débito)"
-                reply = (
-                    f"✓ Configuración actualizada para *{active_comp.name}*.\n"
-                    f"▪ Estado: *{status_txt}*.\n"
-                    f"▪ A partir de ahora, sus facturas emitidas por defecto serán {'exentas de IVA' if active_comp.is_exempt_issuer else 'con 19% de IVA'}."
-                )
-            await whatsapp.send_text(phone, reply)
-            return {"status": "processed"}
-
-        # Si el usuario solicitó transferir presupuesto de empresa a personal
-        if extraction.is_budget_transfer and extraction.transfer_amount:
-            success, receipt_msg, _ = await transfer_company_budget_to_personal(
-                db=db,
-                user=user,
-                amount=extraction.transfer_amount,
-                target_company_name=extraction.target_company_name,
-            )
-            if user.active_mode == "EMPRESA":
-                await touch_company_action(db, user)
-            await whatsapp.send_text(phone, receipt_msg)
-            return {"status": "processed"}
-
-        # Si el usuario solicitó cambiar de modo
-        if extraction.target_mode:
-            switch_msg, _ = await switch_mode(db, user, extraction.target_mode, extraction.target_company_name)
-            await whatsapp.send_text(phone, switch_msg)
-            return {"status": "processed"}
-
-        # Si consultó empresas
-        if extraction.is_companies_list_inquiry:
-            companies = await list_user_companies(db, user.id)
-            if not companies:
-                reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
-            else:
-                lines = ["■ *TUS EMPRESAS*", "──────────────────────────"]
-                for c in companies:
-                    ex_badge = " _[Exenta]_" if getattr(c, "is_exempt_issuer", False) else ""
-                    lines.append(f"• *{c.name}*{ex_badge} (RUT: `{c.rut}`) -> `modo {c.name.lower()}`")
-                reply = "\n".join(lines)
-            await whatsapp.send_text(phone, reply)
-            return {"status": "processed"}
-
-        # Si consultó impuestos
-        if extraction.is_tax_inquiry:
-            if user.active_mode != "EMPRESA" or not active_comp:
-                reply = "[!] Para consultar impuestos F29 debes activar tu empresa. Escribe `modo [nombre de tu empresa]`."
-            else:
-                await touch_company_action(db, user)
-                tax_summary = await get_monthly_tax_summary(db, active_comp)
-                reply = format_tax_summary(tax_summary)
-            await whatsapp.send_text(phone, reply)
-            return {"status": "processed"}
-
-        # Una imagen es SIEMPRE un comprobante de gasto/factura, nunca una consulta
-        if input_type == "image":
-            extraction.is_expense_list_inquiry = False
-            extraction.is_balance_inquiry = False
-            extraction.is_budget_setup = False
-
-        if extraction.total_spent > 0 or extraction.items:
-            extraction.is_expense_list_inquiry = False
-            extraction.is_balance_inquiry = False
-
-        if extraction.is_balance_inquiry:
-            summary = await get_monthly_summary(db, phone, profile_name)
-            reply = format_summary(summary)
-            await whatsapp.send_text(phone, reply)
-            return {"status": "processed"}
-
-        if extraction.is_expense_list_inquiry:
-            month_param = extraction.target_month or (content if isinstance(content, str) else None)
-            data = await get_expense_list(db, phone, raw_month=month_param, profile_name=profile_name)
-            reply = format_expense_list(data)
-            await whatsapp.send_text(phone, reply)
-            return {"status": "processed"}
-
-        # Escudo Anti-RUT y Comandos Administrativos/Tributarios
-        # Si un texto contenía un RUT chileno o palabras de empresa/presupuesto que no se pudieron procesar,
-        # NUNCA debe facturarse como un gasto de compra de millones de pesos.
-        if input_type == "text" and isinstance(content, str):
-            c_lower = content.lower()
-            has_rut = bool(re.search(r"\b[0-9]{1,2}(?:\.[0-9]{3}){2}-[0-9kK]\b|\b[0-9]{7,8}-[0-9kK]\b", c_lower))
-            has_admin_keyword = any(k in c_lower for k in ("empresa", "remanente", "crear empresa", "corrige empresa", "corregir empresa", "presupuesto", "rut"))
-            is_valid_handled = (
-                extraction.is_company_creation
-                or extraction.tax_doc_type is not None
-                or extraction.is_budget_transfer
-                or extraction.is_budget_setup
-                or extraction.set_company_remanente is not None
-                or extraction.set_company_rut is not None
-                or extraction.set_company_exempt is not None
-                or extraction.target_mode is not None
-                or extraction.is_companies_list_inquiry
-                or extraction.is_tax_inquiry
-            )
-            if (has_rut or has_admin_keyword) and not is_valid_handled:
-                help_msg = (
-                    "⚠️ *No pude entender la instrucción de empresa o presupuesto.*\n"
-                    "──────────────────────────\n"
-                    "Para registrar o actualizar tu empresa, usa este formato:\n\n"
-                    "▸ `crear empresa [Nombre] rut [RUT] remanente [Monto] presupuesto [Monto]`\n\n"
-                    "• *Ejemplo:* `crear empresa PomPomSpA rut 8.670.330-0 remanente 100000 presupuesto 750000`\n"
-                    "• *Para corregir solo RUT:* `corrige rut 8.670.330-0`\n"
-                    "• *Para corregir solo presupuesto:* `corrige presupuesto 750000`\n"
-                    "• *Para corregir solo remanente:* `corrige remanente 100000`\n"
-                    "• *Si tienes saldos erróneos:* escribe `reparar saldo` para limpiarlos automáticamente."
-                )
-                await whatsapp.send_text(phone, help_msg)
-                return {"status": "processed"}
-
-        # 7. Procesamiento de Facturas / Boletas y Gastos con Timeout de 5 Minutos
-
-        is_in_company_mode = (user.active_mode == "EMPRESA" and active_comp is not None)
-
-        # Regla de Timeout de 5 minutos: si está en modo empresa y pasaron >300s de inactividad
-        if is_in_company_mode and is_company_timeout_exceeded(user, timeout_seconds=300):
-            item_desc = extraction.items[0].name if extraction.items else "Registro"
-            amt_display = format_currency(extraction.total_spent)
-
-            if extraction.tax_doc_type:
-                pending_payload = {
-                    "kind": "tax_doc",
-                    "doc_direction": extraction.tax_doc_direction or "RECEIVED",
-                    "doc_type": extraction.tax_doc_type,
-                    "total_amount": extraction.total_spent,
-                    "net_amount": extraction.net_amount,
-                    "is_net_amount": extraction.is_net_amount,
-                    "counterpart": extraction.counterpart or "",
-                    "description": item_desc,
-                    "is_exempt": extraction.is_exempt,
-                    "raw_input_type": input_type,
-                }
-            else:
-                pending_payload = {
-                    "kind": "expense",
-                    "extraction": extraction.model_dump(),
-                    "raw_input_type": input_type,
-                }
-
-            await save_pending_action(db, user, pending_payload)
-
-            timeout_confirm_msg = (
-                f"⚠️ *Han pasado más de 5 minutos desde tu última acción en {active_comp.name}.*\n\n"
-                f"¿Dónde deseas registrar este movimiento de *{amt_display}* ({item_desc})?\n\n"
-                f"• Responde *1* para *{active_comp.name}* (sigue en Modo Empresa)\n"
-                f"• Responde *2* para *Personal* (cambia a Modo Personal)\n"
-                f"• O escribe *cancelar*"
-            )
-            await whatsapp.send_text(phone, timeout_confirm_msg)
-            return {"status": "processed"}
-
-        # Si es un documento tributario explícito (Factura, Factura Exenta o Boleta)
-        if extraction.tax_doc_type in {"FACTURA", "FACTURA_EXENTA", "BOLETA"}:
-            if is_in_company_mode:
-                await touch_company_action(db, user)
-                doc, tax_sum = await record_tax_document(
-                    db=db,
-                    user=user,
-                    company=active_comp,
-                    doc_direction=extraction.tax_doc_direction or "RECEIVED",
-                    doc_type=extraction.tax_doc_type,
-                    total_amount=extraction.total_spent,
-                    net_amount=extraction.net_amount,
-                    counterpart=extraction.counterpart or "",
-                    description=extraction.items[0].name if extraction.items else "",
-                    is_exempt=extraction.is_exempt,
-                    raw_input_type=input_type,
-                )
-
-                if doc.doc_direction == "EMITTED":
-                    if doc.is_exempt or doc.doc_type == "FACTURA_EXENTA":
-                        reply = (
-                            f"✓ *Factura Exenta de Venta emitida ({active_comp.name})*\n"
-                            f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
-                            f"▪ *Débito Fiscal IVA:* $0 (DTE 34: Operación no afecta a IVA)\n"
-                            f"▪ *Abono a Presupuesto Empresa:* `+{format_currency(doc.total_amount)}`\n"
-                            f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}* (Total: {format_currency(tax_sum['budget_total'])})\n"
-                        )
-                    else:
-                        reply = (
-                            f"✓ *Factura de Venta emitida ({active_comp.name})*\n"
-                            f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
-                            f"▪ Monto Neto (Ingreso): {format_currency(doc.net_amount)}\n"
-                            f"▪ *Débito Fiscal (+IVA):* `+{format_currency(doc.iva_amount)}` (va a F29)\n"
-                            f"▪ *Abono a Presupuesto Empresa:* `+{format_currency(doc.net_amount)}` (Neto)\n"
-                            f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}* (Total: {format_currency(tax_sum['budget_total'])})\n"
-                        )
-                elif doc.is_exempt or doc.doc_type == "FACTURA_EXENTA":
-                    reply = (
-                        f"✓ *Factura Exenta de Compra registrada ({active_comp.name})*\n"
-                        f"▪ Gasto Total: *{format_currency(doc.total_amount)}* (Gasto operacional deducible)\n"
-                        f"▪ *Crédito Fiscal IVA:* $0 (Sin crédito fiscal)\n"
-                        f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
-                    )
-                elif doc.doc_type == "FACTURA":
-                    reply = (
-                        f"✓ *Factura de Compra registrada ({active_comp.name})*\n"
-                        f"▪ Total Proveedor: {format_currency(doc.total_amount)}\n"
-                        f"▪ Gasto Neto empresa: {format_currency(doc.net_amount)}\n"
-                        f"▪ *Crédito Fiscal IVA recuperado:* `+{format_currency(doc.iva_amount)}`\n"
-                        f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
-                    )
-                else:  # BOLETA
-                    reply = (
-                        f"✓ *Boleta de compra registrada ({active_comp.name})*\n"
-                        f"▪ Gasto Total: *{format_currency(doc.total_amount)}* (Gasto operacional)\n"
-                        f"▪ *Crédito Fiscal IVA:* $0 (Sin crédito fiscal)\n"
-                        f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
-                    )
-
-                f29_part = f"🏛️ Saldo F29 actual: {format_currency(tax_sum['iva_a_pagar'])} a pagar." if tax_sum['iva_a_pagar'] > 0 else f"💰 Remanente F29 a favor: {format_currency(tax_sum['remanente_nuevo'])}."
-                reply += f"▪ {f29_part}"
-
-                await whatsapp.send_text(phone, reply)
-                return {"status": "processed"}
-            else:
-                # Está en modo PERSONAL: registrar como gasto personal común
-                result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
-                reply = (
-                    f"✓ Gasto registrado en *Modo Personal*, {user.name}: {format_currency(extraction.total_spent)}\n"
-                    f"▪ Saldo disponible: {format_currency(value)}\n\n"
-                    "▸ *Aviso:* Al estar en Modo Personal, este documento no genera crédito fiscal IVA. "
-                    "Si pertenecía a tu empresa, escribe `modo [nombre de tu empresa]` y vuelve a registrarlo."
-                )
-                await whatsapp.send_text(phone, reply)
-                return {"status": "processed"}
-
-        # 8. Registro de Gasto o Presupuesto General
-        result_type, value, user = await record_extraction(db, phone, input_type, extraction, profile_name)
-        ctx_label = f" ({active_comp.name})" if is_in_company_mode else ""
-
-        if is_in_company_mode:
-            await touch_company_action(db, user)
-
-        if result_type == "budget":
-            reply = DialogueEngine.format_budget_reply(
-                user_name=user.name,
-                total_budget=float(value),
-                remaining=float(value),
-                is_addition=False,
-                is_company=is_in_company_mode,
-                company_name=active_comp.name if active_comp else None,
-            )
-        elif result_type == "budget_added":
-            summary = await get_monthly_summary(db, phone, profile_name)
-            reply = DialogueEngine.format_budget_reply(
-                user_name=user.name,
-                total_budget=float(summary["total_budget"]),
-                remaining=float(summary["remaining"]),
-                is_addition=True,
-                added_amount=float(value),
-                is_company=is_in_company_mode,
-                company_name=active_comp.name if active_comp else None,
-            )
-        elif result_type == "unrecognized":
-            reply = (
-                f"[!] Hola {user.name} 🐾, no detecté un gasto ni consulta clara.\n\n"
-                "▪ *Opciones disponibles:*\n"
-                "• Registrar gasto: `Almuerzo 4500` o `10 lucas bencina`\n"
-                "• Factura venta: `Emití factura por 1.190.000`\n"
-                "• Factura compra: `Factura insumos 238.000`\n"
-                "• Boleta: `Boleta 45.000`\n"
-                "• Liquidación impuestos: `iva` o `f29`\n"
-                "• Cambiar modo: `modo [empresa]` o `modo personal`\n"
-                "• Ver ayuda completa: `ayuda`"
-            )
-        else:
-            item_name = extraction.items[0].name if extraction.items else "Gasto"
-            reply = DialogueEngine.format_expense_reply(
-                user_name=user.name,
-                item_name=item_name,
-                amount=extraction.total_spent,
-                remaining=float(value),
-                is_company=is_in_company_mode,
-                company_name=active_comp.name if active_comp else None,
-            )
-            if is_in_trial:
-                user.trial_expense_count += 1
-                await db.commit()
-                reply += f"\n\n▸ *Uso de prueba:* {user.trial_expense_count}/{settings.free_trial_max_expenses} registros."
-
-        # Si es un usuario recién creado, darle una bienvenida introductoria
-        if is_new_user and result_type != "budget":
-            reply = (
-                f"✓ *Bienvenido/a, {user.name}* (ID: `{user.user_code}`)\n\n"
-                + reply
-            )
-
-        print(f"--> [WEBHOOK] Enviando respuesta a {mask_phone(phone)}: {reply}")
-        await whatsapp.send_text(phone, reply)
-        print(f"--> [WEBHOOK] Respuesta enviada con éxito a {mask_phone(phone)}")
-        return {"status": "processed"}
     except ValueError as exc:
         print(f"--> [WEBHOOK] ValueError: {exc}")
         if phone:
