@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.formatters import format_currency
 from app.core.timezone import get_now
-from app.models import Company, User
+from app.models import Budget, Company, User
+from app.services.expense_service import active_month
 
 
 def normalize_company_name(name: str) -> str:
@@ -48,7 +49,8 @@ async def create_company(
     initial_tax_credit: float | Decimal = Decimal("0.00"),
     ppm_rate: float | Decimal = Decimal("0.0100"),
     is_exempt_issuer: bool = False,
-) -> tuple[Company, bool]:
+    initial_budget: float | Decimal = Decimal("0.00"),
+) -> tuple[Company, bool, Budget]:
     """Crea una empresa asociada al usuario o actualiza sus datos si ya existe."""
     norm_name = normalize_company_name(name)
     if not norm_name:
@@ -57,6 +59,8 @@ async def create_company(
     clean_r = clean_rut(rut)
     init_credit = Decimal(str(initial_tax_credit or 0))
     ppm = Decimal(str(ppm_rate or 0.01))
+    init_budget_dec = Decimal(str(initial_budget or 0))
+    cur_month = active_month()
 
     # Verificar si ya existe una empresa con nombre similar para este usuario
     existing = await db.scalar(
@@ -70,8 +74,32 @@ async def create_company(
             existing.is_exempt_issuer = True
         if init_credit > 0:
             existing.initial_tax_credit = init_credit
+
+        comp_budget = await db.scalar(
+            select(Budget).where(
+                Budget.user_id == user.id,
+                Budget.company_id == existing.id,
+                Budget.month_year == cur_month,
+                Budget.budget_type == "EMPRESA",
+            )
+        )
+        if comp_budget is None:
+            comp_budget = Budget(
+                user_id=user.id,
+                company_id=existing.id,
+                month_year=cur_month,
+                budget_type="EMPRESA",
+                total_budget=init_budget_dec,
+            )
+            db.add(comp_budget)
+        elif init_budget_dec > 0:
+            comp_budget.total_budget = init_budget_dec
+
+        user.active_mode = "EMPRESA"
+        user.active_company_id = existing.id
+        user.last_company_action_at = get_now()
         await db.commit()
-        return existing, False
+        return existing, False, comp_budget
 
     company = Company(
         user_id=user.id,
@@ -85,13 +113,35 @@ async def create_company(
     db.add(company)
     await db.flush()
 
+    # Crear presupuesto de empresa para el mes en curso
+    comp_budget = Budget(
+        user_id=user.id,
+        company_id=company.id,
+        month_year=cur_month,
+        budget_type="EMPRESA",
+        total_budget=init_budget_dec,
+    )
+    db.add(comp_budget)
+
     # Establecer inmediatamente como empresa activa
     user.active_mode = "EMPRESA"
     user.active_company_id = company.id
     user.last_company_action_at = get_now()
     await db.commit()
 
-    return company, True
+    return company, True, comp_budget
+
+
+async def update_company_remanente(
+    db: AsyncSession,
+    company: Company,
+    new_remanente: float | Decimal,
+) -> Company:
+    """Actualiza el remanente de crédito fiscal IVA asignado a una empresa."""
+    rem_val = Decimal(str(new_remanente or 0))
+    company.initial_tax_credit = rem_val
+    await db.commit()
+    return company
 
 
 async def set_company_exempt_status(

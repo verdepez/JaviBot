@@ -26,6 +26,7 @@ class ExtractionResult(BaseModel):
     company_rut: str | None = None
     initial_credit: float | None = Field(default=None, ge=0)
     target_mode: str | None = None  # "personal" o nombre de empresa
+    target_company_name: str | None = None
     is_companies_list_inquiry: bool = False
     tax_doc_direction: str | None = None  # "EMITTED" o "RECEIVED"
     tax_doc_type: str | None = None  # "FACTURA" o "BOLETA"
@@ -36,3 +37,4 @@ class ExtractionResult(BaseModel):
     is_exempt: bool = False
     company_is_exempt: bool | None = None
     set_company_exempt: bool | None = None
+    set_company_remanente: float | None = Field(default=None, ge=0)

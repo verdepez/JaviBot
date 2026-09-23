@@ -22,12 +22,14 @@ from app.services.company_service import (
     create_company,
     get_active_company,
     get_and_clear_pending_action,
+    get_company_by_name,
     is_company_timeout_exceeded,
     list_user_companies,
     save_pending_action,
     set_company_exempt_status,
     switch_mode,
     touch_company_action,
+    update_company_remanente,
 )
 from app.services.expense_service import (
     delete_last_expense,
@@ -91,7 +93,7 @@ def get_help_message(
         "• *Ver tus empresas:* `mis empresas`\n"
         "• *Crear nueva empresa:*\n"
         "  `crear empresa [Nombre] rut [RUT] remanente [Monto]`\n"
-        "  _Ej: `crear empresa Consultora rut 76.123.456-7 remanente 0 exenta`_\n\n"
+        "  _Ej: `crear empresa Consultora rut 76.123.456-7 remanente 80000 presupuesto 500000`_\n\n"
         "[2] *GESTIÓN EMPRESA Y F29 (Chile / SII):*\n"
         "• *Factura de Venta (Débito Fiscal 19%):*\n"
         "  `Emití factura por 1.190.000 a Cliente X`\n"
@@ -104,7 +106,8 @@ def get_help_message(
         "• *Boleta de Compra (Gasto sin crédito IVA):*\n"
         "  `Boleta materiales 45.000`\n"
         "• *Definir emisor exento:* `empresa exenta si` / `empresa exenta no`\n"
-        "• *Presupuesto mensual empresa:* `Presupuesto 3000000`\n"
+        "• *Presupuesto mensual empresa:* `Presupuesto 3000000` o `corregir presupuesto 3000000`\n"
+        "• *Corregir remanente IVA:* `corregir remanente 150000` o `remanente 150000`\n"
         "• *Liquidación y cálculo de impuestos:* `iva`, `impuestos` o `f29`\n\n"
         "[3] *GASTOS PERSONALES (en Modo Personal):*\n"
         "• *Registrar gasto:* `Almuerzo 4500` o `Uber 3200`\n"
@@ -674,24 +677,73 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
 
         # Si el usuario solicitó crear una empresa
         if extraction.is_company_creation and extraction.company_name and extraction.company_rut:
-            comp_obj, is_new = await create_company(
+            comp_obj, is_new, comp_budget = await create_company(
                 db=db,
                 user=user,
                 name=extraction.company_name,
                 rut=extraction.company_rut,
                 initial_tax_credit=extraction.initial_credit or 0.0,
                 is_exempt_issuer=extraction.company_is_exempt or False,
+                initial_budget=extraction.budget_amount or 0.0,
             )
             action_label = "creada y activada" if is_new else "actualizada y activada"
             exempt_badge = " _(Emisor Exento DTE 34)_" if comp_obj.is_exempt_issuer else ""
             reply = (
                 f"✓ *Empresa {action_label} con éxito*{exempt_badge}\n"
+                f"──────────────────────────\n"
                 f"▪ Nombre: *{comp_obj.name}*\n"
                 f"▪ RUT: `{comp_obj.rut}`\n"
-                f"▪ Emite Exento: {'Sí (DTE 34: 0% Débito IVA)' if comp_obj.is_exempt_issuer else 'No (DTE 33: 19% Débito IVA)'}\n"
-                f"▪ Remanente Inicial IVA: {format_currency(comp_obj.initial_tax_credit)}\n"
-                f"▪ *Modo Activo:* Has entrado en *Modo Empresa ({comp_obj.name})*.\n\n"
-                "▸ Para volver a tus gastos personales en cualquier momento, escribe `modo personal`."
+                f"▪ Emisión DTE: {'Exenta (DTE 34: 0% Débito IVA)' if comp_obj.is_exempt_issuer else 'Afecta (DTE 33: 19% Débito IVA)'}\n"
+                f"▪ Presupuesto asignado: *{format_currency(comp_budget.total_budget)}*\n"
+                f"▪ Remanente asignado: *{format_currency(comp_obj.initial_tax_credit)}*\n"
+                f"▪ Modo Activo: *Modo Empresa ({comp_obj.name})* 🏢\n"
+                f"──────────────────────────\n"
+                f"▸ *¿Ingresaste algún dato erróneo?*\n"
+                f"Si necesitas modificar alguno de estos valores, puedes corregirlo ahora mismo escribiendo:\n"
+                f"• `corregir remanente [monto]` (ej: `corregir remanente 150000`)\n"
+                f"• `corregir presupuesto [monto]` (ej: `corregir presupuesto 500000`)\n\n"
+                f"• Para volver a gastos personales: `modo personal`"
+            )
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        # Si el usuario solicitó corregir o actualizar el remanente de su empresa
+        if extraction.set_company_remanente is not None:
+            target_comp = None
+            if extraction.target_company_name:
+                target_comp = await get_company_by_name(db, user.id, extraction.target_company_name)
+                if not target_comp:
+                    reply = f"[!] No encontré ninguna empresa llamada *'{extraction.target_company_name}'*. Escribe `mis empresas` para ver la lista."
+                    await whatsapp.send_text(phone, reply)
+                    return {"status": "processed"}
+            elif user.active_mode == "EMPRESA" and active_comp:
+                target_comp = active_comp
+            else:
+                user_companies = await list_user_companies(db, user.id)
+                if len(user_companies) == 1:
+                    target_comp = user_companies[0]
+                elif len(user_companies) > 1:
+                    reply = (
+                        "[!] Tienes más de una empresa registrada. Por favor indica cuál deseas actualizar:\n"
+                        "▸ `corregir remanente empresa [Nombre] [Monto]`\n"
+                        "O activa tu empresa primero con `modo [Nombre]`."
+                    )
+                    await whatsapp.send_text(phone, reply)
+                    return {"status": "processed"}
+                else:
+                    reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
+                    await whatsapp.send_text(phone, reply)
+                    return {"status": "processed"}
+
+            await touch_company_action(db, user)
+            target_comp = await update_company_remanente(db, target_comp, extraction.set_company_remanente)
+            reply = (
+                f"✓ *Remanente de IVA actualizado* 🐶🐾\n"
+                f"──────────────────────────\n"
+                f"▪ Empresa: *{target_comp.name}*\n"
+                f"▪ Nuevo remanente asignado: *{format_currency(target_comp.initial_tax_credit)}*\n"
+                f"──────────────────────────\n"
+                f"▸ Este crédito fiscal a favor se imputará automáticamente en tu balance F29 de este mes."
             )
             await whatsapp.send_text(phone, reply)
             return {"status": "processed"}
