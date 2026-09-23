@@ -479,12 +479,22 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                             is_exempt=pending.get("is_exempt", False),
                             raw_input_type=pending.get("raw_input_type", "text"),
                         )
-                        f29_str = f"🏛️ Saldo F29 proyectado: {format_currency(summary['iva_a_pagar'])} a pagar." if summary['iva_a_pagar'] > 0 else f"💰 Remanente F29 a favor: {format_currency(summary['remanente_nuevo'])}."
-                        reply = (
-                            f"✓ *{doc.doc_type.capitalize()} registrada en {active_comp.name}*\n"
-                            f"▪ Monto Total: {format_currency(doc.total_amount)}\n"
-                            f"▪ {f29_str}"
-                        )
+                        if doc.doc_direction == "EMITTED":
+                            abono_val = doc.net_amount if not doc.is_exempt else doc.total_amount
+                            reply = (
+                                f"✓ *{doc.doc_type.capitalize()} de venta emitida en {active_comp.name}*\n"
+                                f"▪ Total Facturado: {format_currency(doc.total_amount)}\n"
+                                f"▪ Abono al Presupuesto Empresa (Neto): +{format_currency(abono_val)}\n"
+                                f"▪ Presupuesto empresa disponible: {format_currency(summary['budget_remaining'])}\n"
+                                f"▪ {f29_str}"
+                            )
+                        else:
+                            reply = (
+                                f"✓ *{doc.doc_type.capitalize()} registrada en {active_comp.name}*\n"
+                                f"▪ Monto Total: {format_currency(doc.total_amount)}\n"
+                                f"▪ Presupuesto empresa disponible: {format_currency(summary['budget_remaining'])}\n"
+                                f"▪ {f29_str}"
+                            )
                     else:
                         ext_dict = pending.get("extraction", {})
                         ext_obj = ExtractionResult.model_validate(ext_dict)
@@ -882,19 +892,24 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                             f"✓ *Factura Exenta de Venta emitida ({active_comp.name})*\n"
                             f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
                             f"▪ *Débito Fiscal IVA:* $0 (DTE 34: Operación no afecta a IVA)\n"
+                            f"▪ *Abono a Presupuesto Empresa:* `+{format_currency(doc.total_amount)}`\n"
+                            f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}* (Total: {format_currency(tax_sum['budget_total'])})\n"
                         )
                     else:
                         reply = (
                             f"✓ *Factura de Venta emitida ({active_comp.name})*\n"
                             f"▪ Total Facturado: *{format_currency(doc.total_amount)}*\n"
-                            f"▪ Monto Neto: {format_currency(doc.net_amount)}\n"
-                            f"▪ *Débito Fiscal (+IVA):* `+{format_currency(doc.iva_amount)}`\n"
+                            f"▪ Monto Neto (Ingreso): {format_currency(doc.net_amount)}\n"
+                            f"▪ *Débito Fiscal (+IVA):* `+{format_currency(doc.iva_amount)}` (va a F29)\n"
+                            f"▪ *Abono a Presupuesto Empresa:* `+{format_currency(doc.net_amount)}` (Neto)\n"
+                            f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}* (Total: {format_currency(tax_sum['budget_total'])})\n"
                         )
                 elif doc.is_exempt or doc.doc_type == "FACTURA_EXENTA":
                     reply = (
                         f"✓ *Factura Exenta de Compra registrada ({active_comp.name})*\n"
-                        f"▪ Gasto total: *{format_currency(doc.total_amount)}* (Gasto operacional deducible)\n"
+                        f"▪ Gasto Total: *{format_currency(doc.total_amount)}* (Gasto operacional deducible)\n"
                         f"▪ *Crédito Fiscal IVA:* $0 (Sin crédito fiscal)\n"
+                        f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
                     )
                 elif doc.doc_type == "FACTURA":
                     reply = (
@@ -902,12 +917,14 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                         f"▪ Total Proveedor: {format_currency(doc.total_amount)}\n"
                         f"▪ Gasto Neto empresa: {format_currency(doc.net_amount)}\n"
                         f"▪ *Crédito Fiscal IVA recuperado:* `+{format_currency(doc.iva_amount)}`\n"
+                        f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
                     )
                 else:  # BOLETA
                     reply = (
                         f"✓ *Boleta de compra registrada ({active_comp.name})*\n"
-                        f"▪ Gasto total: *{format_currency(doc.total_amount)}* (Gasto operacional)\n"
+                        f"▪ Gasto Total: *{format_currency(doc.total_amount)}* (Gasto operacional)\n"
                         f"▪ *Crédito Fiscal IVA:* $0 (Sin crédito fiscal)\n"
+                        f"▪ Presupuesto empresa disponible: *{format_currency(tax_sum['budget_remaining'])}\n"
                     )
 
                 f29_part = f"🏛️ Saldo F29 actual: {format_currency(tax_sum['iva_a_pagar'])} a pagar." if tax_sum['iva_a_pagar'] > 0 else f"💰 Remanente F29 a favor: {format_currency(tax_sum['remanente_nuevo'])}."

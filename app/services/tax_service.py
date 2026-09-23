@@ -92,14 +92,13 @@ async def record_tax_document(
         net = total
         iva = Decimal("0")
 
-    # Asociar presupuesto de empresa si existe para el mes
-    budget = await db.scalar(
-        select(Budget).where(
-            Budget.user_id == user.id,
-            Budget.company_id == company.id,
-            Budget.month_year == month,
-            Budget.budget_type == "EMPRESA",
-        )
+    # Obtener o crear presupuesto de empresa para el mes
+    budget = await get_or_create_company_budget(
+        db=db,
+        user_id=user.id,
+        company_id=company.id,
+        month=month,
+        default_amount=Decimal("0.00"),
     )
 
     doc = TaxDocument(
@@ -119,8 +118,14 @@ async def record_tax_document(
     )
     db.add(doc)
 
+    # Si es una venta emitida por la empresa:
+    # Las facturas emitidas por la empresa son abono a presupuesto empresa descontando el IVA que va a IVA débito
+    if doc_dir == "EMITTED" and budget is not None:
+        net_credit = net if not is_doc_exempt else total
+        budget.total_budget += net_credit
+
     # Si es una compra recibida y hay presupuesto de empresa, registrar el egreso operacional
-    if doc_dir == "RECEIVED" and budget is not None:
+    elif doc_dir == "RECEIVED" and budget is not None:
         # En contabilidad chilena:
         # - Factura afecta: El gasto neto es imputable (el IVA 19% se recupera vía crédito fiscal)
         # - Factura exenta: 100% es gasto operacional deducible (no genera crédito fiscal)
