@@ -40,6 +40,8 @@ async def init_db() -> None:
                     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'budgets') THEN
                         ALTER TABLE budgets ADD COLUMN IF NOT EXISTS budget_type VARCHAR(20) DEFAULT 'PERSONAL';
                         ALTER TABLE budgets ADD COLUMN IF NOT EXISTS company_id INTEGER;
+                        -- Eliminar restricción única antigua que impedía coexistir presupuesto personal y de empresa
+                        ALTER TABLE budgets DROP CONSTRAINT IF EXISTS uq_budget_user_month;
                     END IF;
 
                     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'companies') THEN
@@ -93,7 +95,9 @@ async def init_db() -> None:
         await connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_learned_vocab_term ON learned_vocabulary (term);"))
         await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_learned_vocab_cat ON learned_vocabulary (canonical_category);"))
 
-        # Eliminar índices redundantes si existen (ya cubiertos por los índices compuestos)
+        # Eliminar restricciones o índices redundantes/obsoletos
+        await connection.execute(text("ALTER TABLE budgets DROP CONSTRAINT IF EXISTS uq_budget_user_month;"))
+        await connection.execute(text("DROP INDEX IF EXISTS uq_budget_user_month;"))
         await connection.execute(text("DROP INDEX IF EXISTS ix_expenses_budget_id;"))
         await connection.execute(text("DROP INDEX IF EXISTS ix_expenses_created_at;"))
         await connection.execute(text("DROP INDEX IF EXISTS ix_budgets_user_id;"))
