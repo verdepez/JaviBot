@@ -181,7 +181,7 @@ def try_parse_single_item(text: str) -> dict | None:
     # Un texto con formato de RUT chileno o que gestiona empresas jamás debe registrarse como gasto
     if re.search(r"\b[0-9]{1,2}(?:\.[0-9]{3}){2}-[0-9kK]\b|\b[0-9]{7,8}-[0-9kK]\b", raw):
         return None
-    if any(k in norm for k in ("empresa", "remanente", "presupuesto", "factura emitida", "factura exenta", "corregir", "corrige", "modificar", "modifica")):
+    if any(k in norm for k in ("empresa", "remanente", "presupuesto", "factura emitida", "factura exenta", "corregir", "corrige", "modificar", "modifica", "rut")):
         return None
 
     # Formato con verbos: "Compré comida perro por 25000", "Registra mi ropa comprada por 34000", "Pagué 35000 en veterinario"
@@ -365,6 +365,35 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
         amt = parse_amount(m_rem_direct.group(1), allow_zero=True)
         if amt is not None:
             return ExtractionResult(set_company_remanente=amt)
+
+    # 0a-2b. Corregir o actualizar RUT de la empresa
+    # Con empresa explícita: "corregir rut empresa PomPomSpA 8.670.330-0", "corrige rut de empresa PomPomSpA 8670330-0"
+    m_rut_comp = re.search(
+        r"^(?:corregir|corrige|modificar|modifica|cambiar|cambia|fijar|fija|ajustar|ajusta|actualizar|actualiza)?\s*(?:mi\s+|el\s+)?rut\s+(?:de\s+la\s+empresa\s+|de\s+empresa\s+|empresa\s+)(.+?)(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*([0-9kK\.\-]+)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if m_rut_comp:
+        comp_target = m_rut_comp.group(1).strip()
+        rut_val = m_rut_comp.group(2).strip()
+        digits = re.sub(r"[^0-9]", "", rut_val)
+        if len(digits) >= 6:
+            return ExtractionResult(
+                set_company_rut=rut_val,
+                target_company_name=comp_target,
+            )
+
+    # Directo para empresa activa / por defecto: "corregir rut 8.670.330-0", "corrige el rut 8670330-0", "rut 8.670.330-0"
+    m_rut_direct = re.search(
+        r"^(?:corregir|corrige|modificar|modifica|cambiar|cambia|fijar|fija|ajustar|ajusta|actualizar|actualiza)?\s*(?:mi\s+|el\s+)?rut(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*([0-9kK\.\-]+)$",
+        raw,
+        re.IGNORECASE,
+    )
+    if m_rut_direct:
+        rut_val = m_rut_direct.group(1).strip()
+        digits = re.sub(r"[^0-9]", "", rut_val)
+        if len(digits) >= 6:
+            return ExtractionResult(set_company_rut=rut_val)
 
 
     # 0a-3. Traspaso de presupuesto de Empresa a Personal

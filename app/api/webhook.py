@@ -31,6 +31,7 @@ from app.services.company_service import (
     touch_company_action,
     transfer_company_budget_to_personal,
     update_company_remanente,
+    update_company_rut,
 )
 from app.services.expense_service import (
     delete_last_expense,
@@ -737,6 +738,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 f"──────────────────────────\n"
                 f"▸ *¿Ingresaste algún dato erróneo?*\n"
                 f"Si necesitas modificar alguno de estos valores, puedes corregirlo ahora mismo escribiendo:\n"
+                f"• `corregir rut [nuevo rut]` (ej: `corregir rut 8.670.330-0`)\n"
                 f"• `corregir remanente [monto]` (ej: `corregir remanente 150000`)\n"
                 f"• `corregir presupuesto [monto]` (ej: `corregir presupuesto 500000`)\n\n"
                 f"• Para volver a gastos personales: `modo personal`"
@@ -782,6 +784,47 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 f"▪ Nuevo remanente asignado: *{format_currency(target_comp.initial_tax_credit)}*\n"
                 f"──────────────────────────\n"
                 f"▸ Este crédito fiscal a favor se imputará automáticamente en tu balance F29 de este mes."
+            )
+            await whatsapp.send_text(phone, reply)
+            return {"status": "processed"}
+
+        # Si el usuario solicitó corregir o actualizar el RUT de su empresa
+        if extraction.set_company_rut is not None:
+            target_comp = None
+            if extraction.target_company_name:
+                target_comp = await get_company_by_name(db, user.id, extraction.target_company_name)
+                if not target_comp:
+                    reply = f"[!] No encontré ninguna empresa llamada *'{extraction.target_company_name}'*. Escribe `mis empresas` para ver la lista."
+                    await whatsapp.send_text(phone, reply)
+                    return {"status": "processed"}
+            elif user.active_mode == "EMPRESA" and active_comp:
+                target_comp = active_comp
+            else:
+                user_companies = await list_user_companies(db, user.id)
+                if len(user_companies) == 1:
+                    target_comp = user_companies[0]
+                elif len(user_companies) > 1:
+                    reply = (
+                        "[!] Tienes más de una empresa registrada. Por favor indica cuál deseas actualizar:\n"
+                        "▸ `corregir rut empresa [Nombre] [Nuevo_RUT]`\n"
+                        "O activa tu empresa primero con `modo [Nombre]`."
+                    )
+                    await whatsapp.send_text(phone, reply)
+                    return {"status": "processed"}
+                else:
+                    reply = "No tienes empresas registradas. Crea una con: `crear empresa [Nombre] rut [RUT] remanente [Monto]`"
+                    await whatsapp.send_text(phone, reply)
+                    return {"status": "processed"}
+
+            await touch_company_action(db, user)
+            target_comp = await update_company_rut(db, target_comp, extraction.set_company_rut)
+            reply = (
+                f"✓ *RUT de empresa actualizado* 🐶🐾\n"
+                f"──────────────────────────\n"
+                f"▪ Empresa: *{target_comp.name}*\n"
+                f"▪ Nuevo RUT asignado: `{target_comp.rut}`\n"
+                f"──────────────────────────\n"
+                f"▸ A partir de ahora todos los documentos tributarios y balances se asociarán a este RUT."
             )
             await whatsapp.send_text(phone, reply)
             return {"status": "processed"}
@@ -875,13 +918,14 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         if input_type == "text" and isinstance(content, str):
             c_lower = content.lower()
             has_rut = bool(re.search(r"\b[0-9]{1,2}(?:\.[0-9]{3}){2}-[0-9kK]\b|\b[0-9]{7,8}-[0-9kK]\b", c_lower))
-            has_admin_keyword = any(k in c_lower for k in ("empresa", "remanente", "crear empresa", "corrige empresa", "corregir empresa", "presupuesto"))
+            has_admin_keyword = any(k in c_lower for k in ("empresa", "remanente", "crear empresa", "corrige empresa", "corregir empresa", "presupuesto", "rut"))
             is_valid_handled = (
                 extraction.is_company_creation
                 or extraction.tax_doc_type is not None
                 or extraction.is_budget_transfer
                 or extraction.is_budget_setup
                 or extraction.set_company_remanente is not None
+                or extraction.set_company_rut is not None
                 or extraction.set_company_exempt is not None
                 or extraction.target_mode is not None
                 or extraction.is_companies_list_inquiry
@@ -894,6 +938,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                     "Para registrar o actualizar tu empresa, usa este formato:\n\n"
                     "▸ `crear empresa [Nombre] rut [RUT] remanente [Monto] presupuesto [Monto]`\n\n"
                     "• *Ejemplo:* `crear empresa PomPomSpA rut 8.670.330-0 remanente 100000 presupuesto 750000`\n"
+                    "• *Para corregir solo RUT:* `corrige rut 8.670.330-0`\n"
                     "• *Para corregir solo presupuesto:* `corrige presupuesto 750000`\n"
                     "• *Para corregir solo remanente:* `corrige remanente 100000`\n"
                     "• *Si tienes saldos erróneos:* escribe `reparar saldo` para limpiarlos automáticamente."

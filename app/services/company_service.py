@@ -146,6 +146,19 @@ async def update_company_remanente(
     return company
 
 
+async def update_company_rut(
+    db: AsyncSession,
+    company: Company,
+    new_rut: str,
+) -> Company:
+    """Actualiza el RUT asignado a una empresa."""
+    clean_r = clean_rut(new_rut)
+    company.rut = clean_r
+    await db.commit()
+    await db.refresh(company)
+    return company
+
+
 async def set_company_exempt_status(
     db: AsyncSession,
     company: Company,
