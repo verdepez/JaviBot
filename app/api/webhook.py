@@ -37,9 +37,11 @@ from app.services.expense_service import (
     get_expense_list,
     get_monthly_summary,
     get_or_create_user,
+    purge_bogus_expenses,
     record_extraction,
     update_user_name,
 )
+
 from app.services.gemini_service import GeminiExtractor
 from app.services.tax_service import (
     format_tax_summary,
@@ -676,7 +678,19 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
                 success, msg = await delete_last_expense(db, phone)
                 await whatsapp.send_text(phone, msg)
                 return {"status": "processed"}
+
+            # Reparar saldo y limpiar gastos erróneos de comandos
+            repair_triggers = (
+                "reparar saldo", "reparar mi saldo", "arreglar saldo", "arreglar mi saldo",
+                "limpiar saldo", "limpiar errores", "limpiar gastos erroneos", "limpiar gastos erróneos",
+                "limpiar gastos falsos", "reparar cuenta",
+            )
+            if norm in repair_triggers:
+                _, _, msg = await purge_bogus_expenses(db, phone)
+                await whatsapp.send_text(phone, msg)
+                return {"status": "processed"}
         elif input_type in {"audio", "image"}:
+
             media_id = message.get(input_type, {}).get("id")
             if not media_id:
                 return {"status": "ignored"}
@@ -689,8 +703,17 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
         extraction = await extractor.extract(input_type, content, mime_type, db=db)
         print(f"--> [WEBHOOK] Extracción: {extraction}")
 
-        # Si el usuario solicitó crear una empresa
-        if extraction.is_company_creation and extraction.company_name and extraction.company_rut:
+        # Si el usuario solicitó crear o modificar una empresa
+        if extraction.is_company_creation:
+            if not extraction.company_rut:
+                reply = (
+                    f"⚠️ Por favor indica el RUT para registrar o corregir la empresa *{extraction.company_name}*.\n\n"
+                    f"▸ Formato: `crear empresa {extraction.company_name} rut [RUT] remanente [Monto] presupuesto [Monto]`\n"
+                    f"• Ejemplo: `crear empresa {extraction.company_name} rut 8.670.330-0 remanente 100000 presupuesto 750000`"
+                )
+                await whatsapp.send_text(phone, reply)
+                return {"status": "processed"}
+
             comp_obj, is_new, comp_budget = await create_company(
                 db=db,
                 user=user,
@@ -720,6 +743,7 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             )
             await whatsapp.send_text(phone, reply)
             return {"status": "processed"}
+
 
         # Si el usuario solicitó corregir o actualizar el remanente de su empresa
         if extraction.set_company_remanente is not None:
@@ -845,7 +869,40 @@ async def receive_webhook(request: Request, db: AsyncSession = Depends(get_db)) 
             await whatsapp.send_text(phone, reply)
             return {"status": "processed"}
 
+        # Escudo Anti-RUT y Comandos Administrativos/Tributarios
+        # Si un texto contenía un RUT chileno o palabras de empresa/presupuesto que no se pudieron procesar,
+        # NUNCA debe facturarse como un gasto de compra de millones de pesos.
+        if input_type == "text" and isinstance(content, str):
+            c_lower = content.lower()
+            has_rut = bool(re.search(r"\b[0-9]{1,2}(?:\.[0-9]{3}){2}-[0-9kK]\b|\b[0-9]{7,8}-[0-9kK]\b", c_lower))
+            has_admin_keyword = any(k in c_lower for k in ("empresa", "remanente", "crear empresa", "corrige empresa", "corregir empresa", "presupuesto"))
+            is_valid_handled = (
+                extraction.is_company_creation
+                or extraction.tax_doc_type is not None
+                or extraction.is_budget_transfer
+                or extraction.is_budget_setup
+                or extraction.set_company_remanente is not None
+                or extraction.set_company_exempt is not None
+                or extraction.target_mode is not None
+                or extraction.is_companies_list_inquiry
+                or extraction.is_tax_inquiry
+            )
+            if (has_rut or has_admin_keyword) and not is_valid_handled:
+                help_msg = (
+                    "⚠️ *No pude entender la instrucción de empresa o presupuesto.*\n"
+                    "──────────────────────────\n"
+                    "Para registrar o actualizar tu empresa, usa este formato:\n\n"
+                    "▸ `crear empresa [Nombre] rut [RUT] remanente [Monto] presupuesto [Monto]`\n\n"
+                    "• *Ejemplo:* `crear empresa PomPomSpA rut 8.670.330-0 remanente 100000 presupuesto 750000`\n"
+                    "• *Para corregir solo presupuesto:* `corrige presupuesto 750000`\n"
+                    "• *Para corregir solo remanente:* `corrige remanente 100000`\n"
+                    "• *Si tienes saldos erróneos:* escribe `reparar saldo` para limpiarlos automáticamente."
+                )
+                await whatsapp.send_text(phone, help_msg)
+                return {"status": "processed"}
+
         # 7. Procesamiento de Facturas / Boletas y Gastos con Timeout de 5 Minutos
+
         is_in_company_mode = (user.active_mode == "EMPRESA" and active_comp is not None)
 
         # Regla de Timeout de 5 minutos: si está en modo empresa y pasaron >300s de inactividad

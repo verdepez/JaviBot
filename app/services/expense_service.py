@@ -399,3 +399,71 @@ async def delete_last_expense(db: AsyncSession, phone_number: str) -> tuple[bool
         f"▪ Detalle: {items_desc} ({format_currency(deleted_amount)})\n"
         f"▪ Saldo disponible actualizado: *{format_currency(summary['remaining'])}*"
     )
+
+
+async def purge_bogus_expenses(db: AsyncSession, phone_number: str) -> tuple[int, Decimal, str]:
+    """
+    Busca y elimina compras o gastos registrados erróneamente por comandos fallidos
+    (ej: textos de 'crear nueva empresa', 'corrige empresa', 'corrige presupuesto', o RUTs como monto).
+    Restaura el saldo del usuario inmediatamente.
+    """
+    user = await get_user_by_phone(db, phone_number)
+    if not user:
+        return 0, Decimal("0"), "[!] No se encontró tu cuenta de usuario."
+
+    # Buscar todos los presupuestos del usuario
+    budgets = (await db.scalars(select(Budget).where(Budget.user_id == user.id))).all()
+    if not budgets:
+        return 0, Decimal("0"), f"✓ No tienes presupuestos registrados, {user.name}."
+
+    budget_ids = [b.id for b in budgets]
+    stmt = (
+        select(Expense)
+        .options(selectinload(Expense.items))
+        .where(Expense.budget_id.in_(budget_ids))
+    )
+    expenses = (await db.scalars(stmt)).all()
+
+    bogus = []
+    for exp in expenses:
+        item_names = [it.item_name.lower() for it in exp.items]
+        combined = " ".join(item_names)
+
+        is_bogus = False
+        # Patrones obvios de comandos interpretados como compras
+        if any(k in combined for k in (
+            "empresa", "pompomspa", "crear nueva", "corrige empresa", "corregir empresa",
+            "corrige presupuesto", "corregir presupuesto", "remanente",
+        )):
+            is_bogus = True
+        elif exp.total_amount > Decimal("1000000"):
+            # Si el monto coincide con un RUT (>= 1.000.000) y tiene palabras de comando
+            if any(k in combined for k in ("rut", "presupuesto")):
+                is_bogus = True
+
+        if is_bogus:
+            bogus.append(exp)
+
+    if not bogus:
+        summary = await get_monthly_summary(db, phone_number)
+        return 0, Decimal("0"), f"✓ Tu cuenta está en orden, {user.name}. No se encontraron gastos erróneos de comandos.\n▪ Saldo disponible: {format_currency(summary.get('remaining', Decimal('0')))}"
+
+    total_purged = Decimal("0")
+    for exp in bogus:
+        total_purged += exp.total_amount
+        await db.delete(exp)
+
+    await db.commit()
+
+    summary = await get_monthly_summary(db, phone_number)
+    return (
+        len(bogus),
+        total_purged,
+        f"🧹🐾 *¡Saldo Reparado con Éxito!*\n"
+        f"──────────────────────────\n"
+        f"▪ Se detectaron y eliminaron *{len(bogus)} gastos erróneos* de comandos.\n"
+        f"▪ Total reintegrado a tu saldo: *{format_currency(total_purged)}*\n"
+        f"▪ *Saldo disponible actualizado:* *{format_currency(summary.get('remaining', Decimal('0')))}*\n"
+        f"──────────────────────────\n"
+        f"▸ Tus presupuestos y saldos han vuelto a la normalidad, {user.name}."
+    )

@@ -95,8 +95,13 @@ def parse_amount(val_str: str, allow_zero: bool = False) -> float | None:
     if not clean:
         return None
 
+    # Escudo Anti-RUT: un formato de RUT chileno (ej: 8670330-0 o termina en -[0-9kK]) NUNCA es un monto monetario
+    if "-" in clean and re.search(r"-[0-9kK]$", clean, re.IGNORECASE):
+        return None
+
     clean_l = clean.lower()
     if "luca" in clean_l:
+
         sub = clean_l.replace("lucas", "").replace("luca", "").strip()
         try:
             val_lucas = (float(sub) if sub else 1.0) * 1000.0
@@ -172,8 +177,16 @@ def try_parse_single_item(text: str) -> dict | None:
     raw = text.strip()
     norm = raw.lower().strip(".,¡!¿?")
 
+    # Escudo Anti-RUT y Comandos Administrativos/Tributarios
+    # Un texto con formato de RUT chileno o que gestiona empresas jamás debe registrarse como gasto
+    if re.search(r"\b[0-9]{1,2}(?:\.[0-9]{3}){2}-[0-9kK]\b|\b[0-9]{7,8}-[0-9kK]\b", raw):
+        return None
+    if any(k in norm for k in ("empresa", "remanente", "presupuesto", "factura emitida", "factura exenta", "corregir", "corrige", "modificar", "modifica")):
+        return None
+
     # Formato con verbos: "Compré comida perro por 25000", "Registra mi ropa comprada por 34000", "Pagué 35000 en veterinario"
     # Subcaso 1: [verbo] [concepto] por/en/de [monto]
+
     m_v1 = re.search(VERB_PREFIX + r"\s+(?:mi\s+|el\s+|la\s+|un\s+|una\s+)?(.+?)\s+(?:por|en|de)\s+\$?([0-9][0-9.,]*)(?:\s*(?:pesos|clp|\$))?", norm)
     if m_v1:
         desc = clean_concept(m_v1.group(1))
@@ -218,33 +231,100 @@ def try_parse_single_item(text: str) -> dict | None:
     return None
 
 
+def try_parse_company_command(raw: str) -> ExtractionResult | None:
+    """
+    Parsea comandos de creación o edición de empresa de forma ultra flexible (0 tokens).
+    Soporta variantes como:
+    - 'crear empresa PomPomSpA rut 8.670.330-0 remanente 100000 presupuesto 750000'
+    - 'crear nueva empresa PomPomSpA 8670330-0 remanente 100000 presupuesto 750000'
+    - 'corrige empresa PomPomSpA rut 8.670.330-0 remanente 100000 presupuesto 750000'
+    - 'modificar empresa PomPomSpA 8670330-0 presupuesto 800000'
+    - 'nueva empresa MiPyme rut 76123456-K'
+    """
+    norm = raw.strip()
+    prefix_match = re.match(
+        r"^(?:crear(?:\s+(?:una\s+)?nueva|\s+una)?|agregar(?:\s+nueva)?|nueva|registrar(?:\s+nueva)?|corregir|corrige|modificar|modifica|editar|edita|actualizar|actualiza)\s+empresa\s+(.+)$",
+        norm,
+        re.IGNORECASE,
+    )
+    if not prefix_match:
+        return None
+
+    body = prefix_match.group(1).strip()
+
+    # 1. Buscar si es exenta
+    c_exempt = bool(re.search(r"\b(?:es\s+)?(?:exenta|no\s+afecta)\b", body, re.IGNORECASE))
+
+    # 2. Buscar remanente
+    m_rem = re.search(
+        r"\b(?:remanente|cr[eé]dito(?:\s+fiscal)?)\s*(?:inicial)?(?:\s+(?:es\s+de|es|de|:))?\s*\$?([0-9][0-9\.,\s]*(?:\s*lucas?)?)",
+        body,
+        re.IGNORECASE,
+    )
+    c_rem = parse_amount(m_rem.group(1), allow_zero=True) if m_rem else 0.0
+
+    # 3. Buscar presupuesto
+    m_bud = re.search(
+        r"\bpresupuesto(?:\s+mensual)?(?:\s+(?:es\s+de|es|de|:))?\s*\$?([0-9][0-9\.,\s]*(?:\s*lucas?)?)",
+        body,
+        re.IGNORECASE,
+    )
+    c_bud = parse_amount(m_bud.group(1), allow_zero=True) if m_bud else None
+
+    # 4. Buscar RUT
+    c_rut = None
+    rut_start_idx = None
+    m_rut_kw = re.search(r"\brut\s*:?\s*([0-9kK\.\-]+)", body, re.IGNORECASE)
+    if m_rut_kw:
+        c_rut = m_rut_kw.group(1).strip()
+        rut_start_idx = m_rut_kw.start()
+    else:
+        m_rut_pat = re.search(r"\b([0-9]{1,2}(?:\.[0-9]{3}){2}-[0-9kK]|[0-9]{7,8}-[0-9kK])\b", body)
+        if m_rut_pat:
+            c_rut = m_rut_pat.group(1).strip()
+            rut_start_idx = m_rut_pat.start()
+
+    # 5. Extraer nombre de la empresa (texto antes del RUT o parámetros)
+    cut_indices = []
+    if rut_start_idx is not None:
+        cut_indices.append(rut_start_idx)
+    if m_rem:
+        cut_indices.append(m_rem.start())
+    if m_bud:
+        cut_indices.append(m_bud.start())
+    m_ex = re.search(r"\b(?:es\s+)?(?:exenta|no\s+afecta)\b", body, re.IGNORECASE)
+    if m_ex:
+        cut_indices.append(m_ex.start())
+
+    if cut_indices:
+        first_cut = min(cut_indices)
+        c_name = body[:first_cut].strip()
+    else:
+        c_name = body.strip()
+
+    c_name = re.sub(r"\s+(?:rut|con\s+rut|r\.u\.t\.)\s*$", "", c_name, flags=re.IGNORECASE).strip()
+
+    if not c_name:
+        return None
+
+    return ExtractionResult(
+        is_company_creation=True,
+        company_name=c_name,
+        company_rut=c_rut,
+        initial_credit=c_rem if c_rem is not None else 0.0,
+        budget_amount=c_bud,
+        company_is_exempt=c_exempt,
+    )
+
+
 def try_parse_text_locally(text: str) -> ExtractionResult | None:
     raw = text.strip()
     norm = raw.lower().strip(".,¡!¿?")
 
-    # 0. Creación y gestión de empresas
-    m_company = re.search(
-        r"^(?:crear|agregar|nueva|registrar)\s+empresa\s+(.+?)\s+rut\s+([0-9kK\.\-]+)(.*)$",
-        raw,
-        re.IGNORECASE,
-    )
-    if m_company:
-        c_name = m_company.group(1).strip()
-        c_rut = m_company.group(2).strip()
-        tail = m_company.group(3).strip().lower()
-        c_exempt = bool(re.search(r"\b(?:es\s+)?(?:exenta|no\s+afecta)\b", tail))
-        m_rem = re.search(r"(?:remanente|cr[eé]dito)\s*(?:fiscal)?(?:\s+de)?\s*\$?([0-9][0-9\.,\s]*)", tail)
-        c_rem = parse_amount(m_rem.group(1), allow_zero=True) if m_rem else 0.0
-        m_bud = re.search(r"presupuesto(?:\s+mensual)?(?:\s+(?:es\s+de|es|de|:))?\s*\$?([0-9][0-9\.,\s]*)", tail)
-        c_bud = parse_amount(m_bud.group(1), allow_zero=True) if m_bud else None
-        return ExtractionResult(
-            is_company_creation=True,
-            company_name=c_name,
-            company_rut=c_rut,
-            initial_credit=c_rem if c_rem is not None else 0.0,
-            budget_amount=c_bud,
-            company_is_exempt=c_exempt,
-        )
+    # 0. Creación y gestión/edición de empresas
+    comp_res = try_parse_company_command(raw)
+    if comp_res:
+        return comp_res
 
     # 0a. Configurar empresa activa como exenta o afecta
     m_set_exempt = re.search(
@@ -262,9 +342,9 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
         return ExtractionResult(set_company_exempt=is_ex)
 
     # 0a-2. Corregir o actualizar remanente de IVA de la empresa
-    # Con empresa explícita: "corregir remanente empresa Consultora 350000", "remanente Consultora 350000"
+    # Con empresa explícita: "corregir remanente empresa Consultora 350000", "corrige remanente Consultora 350000"
     m_rem_comp = re.search(
-        r"^(?:corregir|modificar|cambiar|fijar|ajustar|actualizar)?\s*(?:mi\s+)?(?:remanente|cr[eé]dito\s+fiscal)(?:\s+inicial)?\s+(?:de\s+la\s+empresa\s+|de\s+empresa\s+|empresa\s+)(.+?)(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*\$?([0-9][0-9\.,\s]*)$",
+        r"^(?:corregir|corrige|modificar|modifica|cambiar|cambia|fijar|fija|ajustar|ajusta|actualizar|actualiza)?\s*(?:mi\s+)?(?:remanente|cr[eé]dito\s+fiscal)(?:\s+inicial)?\s+(?:de\s+la\s+empresa\s+|de\s+empresa\s+|empresa\s+)(.+?)(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*\$?([0-9][0-9\.,\s]*(?:\s*lucas?)?)$",
         norm,
     )
     if m_rem_comp:
@@ -276,15 +356,16 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
                 target_company_name=comp_target,
             )
 
-    # Directo para empresa activa / por defecto: "corregir remanente 150000", "remanente 150000", "remanente inicial 0"
+    # Directo para empresa activa / por defecto: "corregir remanente 150000", "corrige remanente 150000"
     m_rem_direct = re.search(
-        r"^(?:corregir|modificar|cambiar|fijar|ajustar|actualizar)?\s*(?:mi\s+)?(?:remanente|cr[eé]dito\s+fiscal)(?:\s+inicial)?(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*\$?([0-9][0-9\.,\s]*)$",
+        r"^(?:corregir|corrige|modificar|modifica|cambiar|cambia|fijar|fija|ajustar|ajusta|actualizar|actualiza)?\s*(?:mi\s+)?(?:remanente|cr[eé]dito\s+fiscal)(?:\s+inicial)?(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*\$?([0-9][0-9\.,\s]*(?:\s*lucas?)?)$",
         norm,
     )
     if m_rem_direct:
         amt = parse_amount(m_rem_direct.group(1), allow_zero=True)
         if amt is not None:
             return ExtractionResult(set_company_remanente=amt)
+
 
     # 0a-3. Traspaso de presupuesto de Empresa a Personal
     # Caso 1: Empresa explícita con monto al final
@@ -486,9 +567,10 @@ def try_parse_text_locally(text: str) -> ExtractionResult | None:
 
     # 1b. Configuración o corrección de Presupuesto total
     m_budget = re.search(
-        r"^(?:corregir|modificar|cambiar|fijar|ajustar|actualizar)?\s*(?:mi\s+)?presupuesto(?:\s+mensual)?(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*\$?([0-9][0-9.,\s]*)$",
+        r"^(?:corregir|corrige|modificar|modifica|cambiar|cambia|fijar|fija|ajustar|ajusta|actualizar|actualiza)?\s*(?:mi\s+)?presupuesto(?:\s+mensual)?(?:\s+(?:es\s+de|es|de|a|en|por|:))?\s*\$?([0-9][0-9.,\s]*(?:\s*lucas?)?)$",
         norm,
     )
+
     if m_budget:
         amt = parse_amount(m_budget.group(1))
         if amt:
